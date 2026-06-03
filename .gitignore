@@ -17,3 +17,4 @@ outputs/
 *.jpeg
 *.mp4
 *.avi
+local_context/
