@@ -179,10 +179,16 @@ def build_cutoff_annotation(
     cutoff_y: int,
     image_width: int,
     image_height: int,
+    tracking_roi: dict[str, Any] | None = None,
     notes: str = "",
 ) -> dict[str, Any]:
     """Structured manual cutoff annotation for future training."""
     w, h, y, ref = int(image_width), int(image_height), int(cutoff_y), int(reference_frame_index)
+    roi = tracking_roi or {}
+    x0 = int(roi.get("x0", 0))
+    y0 = int(roi.get("y0", 0))
+    x1 = int(roi.get("x1", w))
+    y1 = int(roi.get("y1", y))
     return {
         "sample_id": str(sample_id),
         "group": str(group),
@@ -192,14 +198,14 @@ def build_cutoff_annotation(
         "cutoff_y": y,
         "cutoff_y_rotated": y,  # same until rotation is implemented
         "analysis_region_description": (
-            "Everything above cutoff_y (y < cutoff). "
-            "Region below is excluded blurry/nucleus-adjacent area."
+            "Upper/central actin-rich filament tracking region above cutoff_y. "
+            "Lower perinuclear/nucleus-adjacent signal is excluded from 2D velocity tracking."
         ),
         "analysis_region_coords": {
-            "x0": 0,
-            "y0": 0,
-            "x1": w,
-            "y1": y,
+            "x0": max(0, min(x0, w)),
+            "y0": max(0, min(y0, h)),
+            "x1": max(0, min(x1, w)),
+            "y1": max(0, min(y1, h)),
         },
         "excluded_region_coords": {
             "x0": 0,
@@ -207,6 +213,8 @@ def build_cutoff_annotation(
             "x1": w,
             "y1": h,
         },
+        "tracking_roi": tracking_roi,
+        "crop_method": roi.get("method", "manual_cutoff"),
         "original_dimensions": {"width": w, "height": h},
         "rotated_dimensions": {"width": w, "height": h},
         "segmentation_method": "not_applied_phase1",
