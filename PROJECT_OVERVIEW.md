@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-ActinTrackCV is an early-stage research software project for quantifying F-actin organization, dynamics, and 3D structural features from confocal microscopy data. The project is currently in the data-understanding and preprocessing phase. The immediate work is not model training yet; it is building a clean foundation for image extraction, A/B region cropping, 2D filament coordinate tracking, velocity measurement, and an eventual R Shiny frontend.
+ActinTrackCV is an early-stage research software project for quantifying F-actin organization, dynamics, and 3D structural features from confocal microscopy data. The project is currently in the data-understanding and preprocessing phase. The immediate work is not model training yet; it is building a clean foundation for image extraction, biological tracking-ROI detection, 2D filament coordinate tracking, velocity measurement, and an eventual R Shiny frontend.
 
 The core scientific goal is to compare wild-type and mutant actin behavior. The local context and slide deck frame the biological questions around:
 
@@ -15,13 +15,13 @@ The core scientific goal is to compare wild-type and mutant actin behavior. The 
 The current data are a mixture of lossy `.avi`/`.mp4` exports and a small number of higher-value `.tif` stacks. Raw microscope files are still pending. Until those arrive, the practical plan is:
 
 1. Establish the **2D velocity-tracking pipeline first** using the currently available `.avi`, `.mp4`, and usable 2D views/projections from `.tif` files.
-2. Focus that 2D pipeline exclusively on regions/panels **A** and **B** from the `Picture1.jpg` layout. Region/panel C is the merged overlay and should be excluded from the primary tracking workflow.
+2. Focus that 2D pipeline on the upper/central actin-rich tracking ROI shown by the A/B labels in `Picture1.jpg`; exclude the lower perinuclear/nucleus-adjacent C region from the primary tracking workflow.
 3. Keep thickness, depth profiles, and other 3D metrics decoupled as a future module based on the `.tif` stacks.
 4. Build the frontend shell for an R Shiny app with a multi-tab design: Tab 1 for 2D Tracking, Tab 2 for 3D Analysis as a future milestone.
 
 The project should be thought of as two linked tracks:
 
-- **Track A: 2D Tracking and Velocity** from `.avi`/`.mp4` frames plus usable 2D `.tif` slices/projections, focused on A/B regions, filament coordinates, and velocity over time. This is the main focus.
+- **Track A: 2D Tracking and Velocity** from `.avi`/`.mp4` frames plus usable 2D `.tif` slices/projections, focused on the actin-rich biological tracking ROI, filament coordinates, and velocity over time. This is the main focus.
 - **Track B: 3D Analysis** from 16-bit `.tif` Z-stacks, focused on filament thickness and depth profiles. This is a future milestone and should remain separate from the 2D tracking code path.
 
 ## Current Repository Layout
@@ -73,13 +73,7 @@ AI-assisted computer vision for quantifying actin filament dynamics and 3D struc
 
 `local_context/Claude Transcript ActinTrack.md` is the main project history and rationale. It documents the earlier decisions around Roboflow, annotation classes, frame extraction, dataset organization, and the current uncertainty around actin cable annotation.
 
-`local_context/Picture1.jpg` is the key reference image for the A/B/C crop discussion. It shows three horizontal panels:
-
-- **A:** cyan actin channel / F-actin signal.
-- **B:** magenta channel / cell or nuclear-context signal.
-- **C:** merged overlay of A and B.
-
-The current crop requirement is to remove the C panel and retain only A and B.
+`local_context/Picture1.jpg` is the key reference image for the biological crop discussion. Its yellow labels mark regions within the cell. A/B correspond to the upper and central actin-rich tracking regions; C marks the lower perinuclear/nucleus-adjacent region that is excluded for the current 2D tracking milestone.
 
 `local_context/F-actin imaging.pptx` is a slide deck with sample and experimental context. Extracted slide text indicates:
 
@@ -120,9 +114,9 @@ Observed metadata:
 | `01.tif` | TIFF | `(15, 2, 800, 412) uint16` | 15-plane, 2-channel stack. Channel 0 is actin. Channel 1 is nucleus. User visually confirmed the first axis is different depths, so this is a Z-stack rather than a time movie. |
 | `02.tif` | TIFF | `(28, 360, 196) uint16` | Appears to be a single-channel stack or differently stored Z-stack. Needs visual inspection before use. |
 | `03.avi` | AVI | 15 frames, 290 x 624, Motion JPEG | Exported video, likely actin-channel-only or actin-dominant. |
-| `Montage of MAX_01.jpg` | JPEG | 1236 x 800 | Derived display montage with A/B/C panels. Not raw data. Useful for crop reference. |
+| `Montage of MAX_01.jpg` | JPEG | 1236 x 800 | Derived display montage. Not raw data. Useful as a clean reference for actin-signal gradients without the yellow annotation boxes in `Picture1.jpg`. |
 
-`Montage of MAX_01.jpg` matches `Picture1.jpg` structurally: A, B, and C are side-by-side. Since it is exactly 1236 px wide, equal thirds are 412 px each. Keeping A and B means cropping `x = 0..824` and dropping the rightmost 412 px.
+`Montage of MAX_01.jpg` contains separate display views, but the current tracking crop should be derived from the actin-rich biological region within a cell, not from equal-width display-panel fractions.
 
 #### `2_WT_550/`
 
@@ -252,8 +246,8 @@ The current 2D workflow is:
 ```text
 raw_source/*.avi, *.mp4, and usable 2D views from *.tif
     -> extract_2d_frames.py
-    -> crop/prepare A and B regions only
-    -> frames/<movie_batch>/*.png or equivalent A/B frame products
+    -> detect upper/central actin tracking ROI
+    -> frames/<movie_batch>/*.png or equivalent ROI frame products
     -> frames_index.csv
     -> Roboflow instance-segmentation project
     -> manual annotations / future model training
@@ -339,55 +333,49 @@ Recommended near-term annotation policy:
 - Tag images with unresolved actin meshwork: `dense_meshwork_visible`.
 - Do not commit to per-cable labels until the lab decides whether the data actually resolves individual cables.
 
-## A/B/C Crop Requirement
+## Biological Tracking ROI Requirement
 
-`Picture1.jpg` and `raw_source/1_WT_218/Montage of MAX_01.jpg` show the relevant A/B/C layout:
+`Picture1.jpg` is the reference for the biological regions, not a directive to
+crop equal-width display panels. The yellow A/B/C labels mark regions within the
+cell:
 
-```text
-[ A: cyan actin ][ B: magenta/context ][ C: merged overlay ]
-```
+- **A/B:** upper and central actin-rich filament regions where 2D tracking and velocity should be measured.
+- **C:** lower perinuclear / nucleus-adjacent transition region that should be excluded for the current 2D tracking milestone.
 
-The current requirement is to crop out C and keep only A and B.
+The app now treats the crop as a biological signal problem. It detects the
+actin-dominant foreground, computes row-wise signal mass and cell-width profiles,
+and finds the sustained gradient where the upper/central filament shaft enters
+the brighter lower perinuclear region. This avoids fixed pixel fractions and
+avoids assuming that A/B/C are side-by-side panels.
 
-For the initial 2D tracking milestone, A and B are the only regions/panels that should enter the tracking and velocity workflow. C is a merged visualization panel. It is useful for human inspection, but it should not be used as a computational input for coordinate tracking or velocity calculation unless the lab later defines a specific reason to use merged overlays.
+For `.avi`, `.mp4`, and previewable `.tif` frames, the practical crop is:
 
-For simple three-panel images with equal-width panels:
+- keep the upper/central filament tracking ROI above the detected cutoff;
+- exclude the lower perinuclear/nucleus-adjacent region below the cutoff;
+- allow manual cutoff adjustment when the detector is uncertain.
 
-- Keep the left two-thirds of the image.
-- Drop the right one-third.
-
-Concrete examples:
-
-- `raw_source/1_WT_218/Montage of MAX_01.jpg` is 1236 x 800. Each panel is 412 px wide. Keep `x = 0..824`.
-- `local_context/Picture1.jpg` is 940 x 610. It is not evenly divisible by three, so an approximate crop is `x = 0..626` or `x = 0..627`. A production crop script should either use measured panel boundaries or detect the vertical separator, not blindly assume exact thirds in all cases.
-
-Important caveat: not all source files are A/B/C panel images. The extracted AVI/MP4 frames in `frames/` are single-frame cell images, not three-panel montages. A crop script must not blindly remove the right third from every file. It should either:
-
-- apply only to known A/B/C composite images, or
-- support per-source crop metadata, or
-- first detect whether a frame is a horizontal multi-panel layout.
-
-For `.tif` files, the A/B concept may refer to channels or regions, not side-by-side panels. `01.tif` stores channels separately in a `(Z, C, Y, X)` array. Cropping a `.tif` by removing a rightmost display panel would be wrong unless the `.tif` itself is a rendered montage. For raw stacks, preserve the channel axis and operate on channel 0/1 directly.
+For raw `.tif` stacks, preserve channels and Z/T axes. Use the actin channel for
+2D tracking ROI detection, and keep 3D thickness/depth analysis decoupled.
 
 ## 2D Tracking and A/B Metrics Direction
 
 The primary script direction is now a 2D tracking and velocity pipeline. Ratio-style A/B metrics can still be useful, but they are secondary to coordinate tracking and should be implemented only after the A/B input definition is clear. The phrase "A and B" is currently overloaded:
 
-- In `Picture1.jpg`, A and B appear to be display panels or channels.
-- In the PowerPoint, "Actin velocity differences between A and B areas" may mean biological areas or regions of the cell.
+- In `Picture1.jpg`, A and B refer to biological tracking regions within the actin-rich cell body.
+- In the PowerPoint, "Actin velocity differences between A and B areas" likewise appears to mean biological areas or regions of the cell.
 
 Before implementing ratio or A/B comparison metrics, define the target explicitly. Likely candidates:
 
-1. **Panel/channel ratio:** compare intensity, area, or signal density between the A and B panels/channels.
-2. **Region ratio:** compare actin intensity, cable density, velocity, or thickness between two manually defined cell regions A and B.
+1. **Region ratio:** compare actin intensity, cable density, velocity, or thickness between two manually or automatically defined cell regions A and B.
+2. **Channel ratio:** compare actin signal to the cell/nucleus context channel only when a raw multi-channel stack is available.
 3. **Structure ratio:** compare actin cable signal to cell or nucleus signal.
 4. **Motion ratio:** compare velocity or displacement metrics between two areas over time.
 
 A robust first version of the 2D tracking script should:
 
 - Accept an input image/video/stack path.
-- Know whether the file is a raw stack, single frame, or A/B/C montage.
-- If montage: crop to A and B and optionally save the A-only and B-only panels.
+- Know whether the file is a raw stack, single frame, or rendered montage.
+- Detect the upper/central filament tracking ROI using actin foreground, signal mass, and the gradient into the lower perinuclear region.
 - If raw `.tif`: preserve 16-bit data and separate channel arrays.
 - Extract filament coordinates in each usable timepoint/frame.
 - Link coordinates over time into tracks.
@@ -419,8 +407,8 @@ Purpose:
 
 - Track filament coordinates over time.
 - Calculate velocity over time.
-- Restrict the current workflow to A and B regions/panels from the `Picture1.jpg` layout.
-- Exclude C from computational tracking because it is a merged overlay.
+- Restrict the current workflow to the upper/central actin-rich tracking ROI from the `Picture1.jpg` biological-region interpretation.
+- Exclude the lower perinuclear/nucleus-adjacent region from computational tracking.
 - Support `.avi`, `.mp4`, and available `.tif`-derived 2D views/projections when appropriate.
 
 Core controls:
@@ -429,16 +417,15 @@ Core controls:
 - sample selector: 218 / 550 / 515 / 175
 - movie/file selector
 - frame/timepoint selector
-- A/B crop mode selector
+- signal ROI detector with manual cutoff review
 - tracking method selector, initially placeholder if the backend is not implemented
 - acquisition interval input, defaulting to lab-confirmed metadata rather than video playback FPS
 
 Core displays:
 
 - original frame or montage
-- A/B-only crop preview
-- A panel / region view
-- B panel / region view
+- detected tracking ROI preview
+- cutoff/foreground diagnostic view
 - coordinate overlay
 - track overlay
 - velocity-over-time plot
@@ -519,7 +506,7 @@ The Shiny frontend should start from `frames_index.csv` because it already provi
 
 4. **Actin cable annotation is unresolved.** Dense meshwork may not support one-polygon-per-cable annotation. The lab needs to decide whether to label discrete cables only, introduce meshwork/perinuclear classes, or defer cable segmentation until better raw data arrives.
 
-5. **A/B/C crop logic must be conditional.** Some files are side-by-side montages, while others are raw stacks or single-panel frames. A blind crop would destroy valid data.
+5. **Tracking ROI logic must be signal-driven.** A blind display-panel crop would destroy valid data. The current crop should follow actin foreground and the transition into the lower perinuclear region.
 
 6. **TIF workflows must preserve bit depth.** Converting 16-bit TIF stacks to 8-bit PNG is fine for display and some annotation workflows, but quantitative analysis should preserve original 16-bit intensities.
 
@@ -534,13 +521,13 @@ The Shiny frontend should start from `frames_index.csv` because it already provi
    - Ask for pixel size, Z-step, and true acquisition interval.
    - Ask whether `3_Mutant_515/03_676-6-3.mp4` and `04_676-6-3.mp4` are intentional duplicate replicate IDs.
 
-2. **Write a crop script for A/B/C composites.**
-   - Start with montage JPEG support.
-   - Keep A and B, drop C.
-   - Add guardrails so single-panel frames are not cropped accidentally.
+2. **Write/refine the biological tracking-ROI crop script.**
+   - Start with `.avi`, `.mp4`, and previewable `.tif` support.
+   - Detect the upper/central actin tracking ROI from signal gradients.
+   - Exclude the lower perinuclear/nucleus-adjacent region.
 
 3. **Define and prototype the 2D tracking pipeline.**
-   - Decide how filament coordinates will be detected in A and B.
+   - Decide how filament coordinates will be detected in the tracking ROI.
    - Confirm the acquisition interval for velocity calculations.
    - Produce coordinate, track, and velocity CSV outputs.
 

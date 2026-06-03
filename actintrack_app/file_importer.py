@@ -64,7 +64,8 @@ def import_files(
         if not is_supported_file(src_path):
             raise ValueError(
                 f"Unsupported file type: {src_path.suffix}. "
-                f"Supported: .avi, .mp4, .tif, .tiff, .png, .jpg, .jpeg"
+                "Supported: .avi, .mp4, .tif, .tiff, .oib, .oif, .oir, "
+                ".png, .jpg, .jpeg"
             )
 
         sample_id = _next_sample_id(df, group_name)
@@ -86,6 +87,10 @@ def import_files(
         df = load_samples_csv(samples_path)
         df = pd.concat([df, pd.DataFrame([record])], ignore_index=True)
         save_samples_csv(samples_path, df)
-        created.append(record)
+
+        import_result = dict(record)
+        import_result["source_path"] = str(src_path.resolve())
+        import_result["destination_path"] = str(dest_path.resolve())
+        created.append(import_result)
 
     return created

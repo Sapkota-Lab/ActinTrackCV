@@ -4,14 +4,23 @@ from __future__ import annotations
 
 from pathlib import Path
 
-# Biological groups
-GROUP_WT = "2_WT_550"
-GROUP_MUTANT = "3_Mutant_515"
-GROUPS = (GROUP_WT, GROUP_MUTANT)
+# Biological groups / sample folders currently present in ActinTrackCV.
+GROUP_WT_218 = "1_WT_218"
+GROUP_WT_550 = "2_WT_550"
+GROUP_MUTANT_515 = "3_Mutant_515"
+GROUP_MUTANT_175 = "4_Mutant_175"
+
+# Backward-compatible aliases used by the first GUI pass.
+GROUP_WT = GROUP_WT_550
+GROUP_MUTANT = GROUP_MUTANT_515
+
+GROUPS = (GROUP_WT_218, GROUP_WT_550, GROUP_MUTANT_515, GROUP_MUTANT_175)
 
 GROUP_PREFIX = {
-    GROUP_WT: "WT",
-    GROUP_MUTANT: "MUT",
+    GROUP_WT_218: "WT218",
+    GROUP_WT_550: "WT550",
+    GROUP_MUTANT_515: "MUT515",
+    GROUP_MUTANT_175: "MUT175",
 }
 
 # Supported input formats
@@ -20,6 +29,9 @@ SUPPORTED_EXTENSIONS = {
     ".mp4",
     ".tif",
     ".tiff",
+    ".oib",
+    ".oif",
+    ".oir",
     ".png",
     ".jpg",
     ".jpeg",
@@ -27,6 +39,7 @@ SUPPORTED_EXTENSIONS = {
 
 VIDEO_EXTENSIONS = {".avi", ".mp4"}
 IMAGE_EXTENSIONS = {".tif", ".tiff", ".png", ".jpg", ".jpeg"}
+RAW_MICROSCOPY_EXTENSIONS = {".oib", ".oif", ".oir"}
 
 # Project subfolders (relative to root)
 RAW_DIR = "raw"
@@ -58,6 +71,8 @@ def file_type_label(path: Path) -> str:
         return "video"
     if ext in {".tif", ".tiff"}:
         return "tiff"
+    if ext in RAW_MICROSCOPY_EXTENSIONS:
+        return "raw_microscopy"
     return "image"
 
 
