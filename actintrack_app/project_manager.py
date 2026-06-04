@@ -49,8 +49,22 @@ def get_raw_dir(root: Path, group: str) -> Path:
     return root / RAW_DIR / group
 
 
-def get_processed_sample_dir(root: Path, group: str, sample_id: str) -> Path:
-    return root / PROCESSED_DIR / group / sample_id
+def get_raw_batch_dir(root: Path, group: str, batch_name: str) -> Path:
+    from actintrack_app.batch_manager import sanitize_batch_name
+
+    return root / RAW_DIR / group / sanitize_batch_name(batch_name)
+
+
+def get_processed_batch_dir(root: Path, group: str, batch_name: str) -> Path:
+    from actintrack_app.batch_manager import sanitize_batch_name
+
+    return root / PROCESSED_DIR / group / sanitize_batch_name(batch_name)
+
+
+def get_processed_sample_dir(
+    root: Path, group: str, batch_name: str, sample_id: str
+) -> Path:
+    return get_processed_batch_dir(root, group, batch_name) / sample_id
 
 
 def get_previews_dir(root: Path, group: str) -> Path:

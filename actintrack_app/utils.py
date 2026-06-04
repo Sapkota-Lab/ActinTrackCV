@@ -49,16 +49,61 @@ PREVIEWS_DIR = "previews"
 SAMPLES_CSV = "samples.csv"
 CROP_METADATA_JSON = "crop_metadata.json"
 
+# Sample processing statuses (samples.csv processing_status)
+STATUS_IMPORTED = "imported"
+STATUS_RAW_IMPORTED = "raw_imported"
+STATUS_UNANNOTATED = "unannotated"
+STATUS_CUTOFF_MARKED = "cutoff_marked"  # legacy Phase 1
+STATUS_ROI_MARKED = "roi_marked"
+STATUS_ROI_PROPAGATED = "roi_propagated_needs_review"
+STATUS_ROI_APPROVED = "roi_approved"
+STATUS_PROCESSED = "processed"
+STATUS_FAILED = "failed"
+STATUS_MISSING_FILE = "missing_file"
+
 SAMPLES_CSV_COLUMNS = [
     "sample_id",
     "group",
+    "batch_number",
+    "batch_name",
+    "batch_id",
     "original_filename",
     "stored_path",
     "file_type",
+    "is_video",
+    "is_image_sequence",
+    "frame_number",
+    "auto_export_name",
+    "custom_export_name",
+    "final_export_name",
     "import_date",
     "processing_status",
+    "annotation_source",
+    "review_status",
     "notes",
 ]
+
+RECENT_WORKSPACES_JSON = "recent_workspaces.json"
+
+# Propagation scope keys (biological batch aware)
+SCOPE_SAME_BATCH = "same_biological_batch"
+SCOPE_UNPROCESSED_IN_BATCH = "unprocessed_in_biological_batch"
+SCOPE_ALL_IN_GROUP = "all_in_condition_group"
+SCOPE_SELECTED = "selected"
+
+UNPROCESSED_STATUSES = frozenset(
+    {
+        "",
+        STATUS_IMPORTED,
+        STATUS_RAW_IMPORTED,
+        STATUS_UNANNOTATED,
+        STATUS_CUTOFF_MARKED,
+        "cutoff_marked",
+    }
+)
+PROTECTED_ANNOTATION_STATUSES = frozenset(
+    {STATUS_ROI_APPROVED, STATUS_PROCESSED}
+)
 
 
 def is_supported_file(path: Path) -> bool:

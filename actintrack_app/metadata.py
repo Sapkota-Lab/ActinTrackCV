@@ -27,17 +27,199 @@ def _coerce_samples_df_dtypes(df: pd.DataFrame) -> pd.DataFrame:
     text_cols = (
         "sample_id",
         "group",
+        "batch_number",
+        "batch_name",
+        "batch_id",
         "original_filename",
         "stored_path",
         "file_type",
+        "is_video",
+        "is_image_sequence",
+        "frame_number",
+        "auto_export_name",
+        "custom_export_name",
+        "final_export_name",
         "import_date",
         "processing_status",
+        "annotation_source",
+        "review_status",
         "notes",
     )
     for col in text_cols:
         if col in df.columns:
             df[col] = df[col].fillna("").astype(str)
     return df
+
+
+def migrate_workspace_schema(root: Path) -> None:
+    """Upgrade samples.csv and batches.json for batch numbers and export naming."""
+    from actintrack_app.batch_manager import (
+        list_batches,
+        parse_batch_number_from_name,
+        register_batch_from_samples,
+        repair_batch_registry,
+        sanitize_batch_name,
+    )
+
+    repair_batch_registry(root)
+    from actintrack_app.export_naming import (
+        auto_export_name_for_sample,
+        resolve_final_export_name,
+    )
+    from actintrack_app.utils import VIDEO_EXTENSIONS
+
+    root = Path(root).resolve()
+    migrate_samples_batch_columns(root)
+    samples_path = root / METADATA_DIR / SAMPLES_CSV
+    df = load_samples_csv(samples_path)
+    changed = False
+
+    for idx, row in df.iterrows():
+        group = str(row.get("group", ""))
+        batch_name = str(row.get("batch_name", "")).strip()
+        if not batch_name:
+            batch_name = "Legacy_Batch"
+            df.at[idx, "batch_name"] = batch_name
+            changed = True
+
+        bn = str(row.get("batch_number", "")).strip()
+        if not bn:
+            parsed = parse_batch_number_from_name(batch_name)
+            if parsed is None:
+                batches = list_batches(root, group)
+                parsed = len(batches) or 1
+            df.at[idx, "batch_number"] = str(parsed)
+            changed = True
+        batch_number = int(str(df.at[idx, "batch_number"]))
+
+        stored = str(row.get("stored_path", ""))
+        ext = Path(stored).suffix.lower() if stored else ""
+        is_video = str(row.get("is_video", "")).lower() == "true" or ext in VIDEO_EXTENSIONS
+        if str(row.get("is_video", "")).strip() == "":
+            df.at[idx, "is_video"] = "true" if is_video else "false"
+            changed = True
+        if str(row.get("is_image_sequence", "")).strip() == "":
+            df.at[idx, "is_image_sequence"] = "false" if is_video else "true"
+            changed = True
+
+        fn = str(row.get("frame_number", "")).strip()
+        if not fn:
+            df.at[idx, "frame_number"] = "0"
+            changed = True
+
+        auto = str(row.get("auto_export_name", "")).strip()
+        if not auto and group:
+            auto = auto_export_name_for_sample(
+                group=group,
+                batch_number=batch_number,
+                is_video=is_video,
+                frame_number=int(df.at[idx, "frame_number"] or 0),
+            )
+            df.at[idx, "auto_export_name"] = auto
+            changed = True
+        custom = str(row.get("custom_export_name", "")).strip()
+        final = str(row.get("final_export_name", "")).strip()
+        if not final:
+            df.at[idx, "final_export_name"] = resolve_final_export_name(
+                auto or str(df.at[idx, "auto_export_name"]),
+                custom or None,
+            )
+            changed = True
+
+        if not str(row.get("annotation_source", "")).strip():
+            df.at[idx, "annotation_source"] = ""
+        if not str(row.get("review_status", "")).strip():
+            df.at[idx, "review_status"] = "pending"
+            changed = True
+
+        status = str(row.get("processing_status", ""))
+        if status == "imported":
+            df.at[idx, "processing_status"] = "raw_imported"
+            changed = True
+
+        bid = str(row.get("batch_id", "")).strip()
+        if not bid:
+            from actintrack_app.utils import GROUP_PREFIX
+
+            prefix = GROUP_PREFIX.get(group, "B")
+            bid = f"{prefix}_B{batch_number:03d}"
+            df.at[idx, "batch_id"] = bid
+            changed = True
+
+        register_batch_from_samples(
+            root,
+            group,
+            batch_name,
+            bid,
+            batch_number=batch_number,
+        )
+
+    if changed:
+        save_samples_csv(samples_path, df)
+
+
+def migrate_samples_batch_columns(root: Path) -> None:
+    """
+    Add batch_name/batch_id to existing projects and assign legacy flat imports
+    to Legacy_Batch folders when needed.
+    """
+    from actintrack_app.batch_manager import (
+        LEGACY_BATCH_NAME,
+        register_batch_from_samples,
+        sanitize_batch_name,
+    )
+    from actintrack_app.utils import GROUP_PREFIX, RAW_DIR
+
+    root = Path(root).resolve()
+    samples_path = root / METADATA_DIR / SAMPLES_CSV
+    df = load_samples_csv(samples_path)
+    changed = False
+
+    for idx, row in df.iterrows():
+        batch_name = str(row.get("batch_name", "")).strip()
+        batch_id = str(row.get("batch_id", "")).strip()
+        group = str(row.get("group", ""))
+        stored = str(row.get("stored_path", ""))
+
+        if batch_name and batch_id:
+            register_batch_from_samples(root, group, batch_name, batch_id)
+            continue
+
+        changed = True
+        safe_legacy = sanitize_batch_name(LEGACY_BATCH_NAME)
+        prefix = GROUP_PREFIX.get(group, "B")
+        bid = batch_id or f"{prefix}_B000"
+        if not batch_id:
+            register_batch_from_samples(root, group, safe_legacy, bid)
+
+        parts = Path(stored).parts
+        # raw/<group>/<file> -> move metadata to raw/<group>/Legacy_Batch/<file>
+        if (
+            len(parts) >= 3
+            and parts[0] == RAW_DIR
+            and parts[1] == group
+            and len(parts) == 3
+        ):
+            filename = parts[2]
+            new_stored = f"{RAW_DIR}/{group}/{safe_legacy}/{filename}"
+            src = root / stored
+            dest = root / new_stored
+            if src.is_file() and not dest.exists():
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    src.rename(dest)
+                except OSError:
+                    pass
+            if dest.is_file():
+                df.at[idx, "stored_path"] = new_stored
+
+        df.at[idx, "batch_name"] = safe_legacy
+        df.at[idx, "batch_id"] = bid
+        if "batch_number" in df.columns and not str(df.at[idx, "batch_number"]).strip():
+            df.at[idx, "batch_number"] = "1"
+
+    if changed:
+        save_samples_csv(samples_path, df)
 
 
 def load_samples_csv(path: Path) -> pd.DataFrame:
@@ -167,6 +349,12 @@ def save_sample_crop_annotation(
     data = load_crop_metadata(crop_meta_path)
     data["samples"][sample_id] = annotation
     save_crop_metadata(crop_meta_path, data)
+
+
+def get_sample_annotation(root: Path, sample_id: str) -> dict[str, Any] | None:
+    crop_path = Path(root).resolve() / METADATA_DIR / CROP_METADATA_JSON
+    data = load_crop_metadata(crop_path)
+    return data.get("samples", {}).get(str(sample_id))
 
 
 def build_cutoff_annotation(

@@ -195,14 +195,104 @@ def crop_tracking_region(image: np.ndarray, crop: TrackingCrop | None = None) ->
     return image[crop.y0 : crop.y1, crop.x0 : crop.x1, ...].copy()
 
 
-def segment_cell(frame: np.ndarray, params: dict[str, Any]) -> np.ndarray:
-    """Phase 2: whole-cell segmentation mask."""
-    raise NotImplementedError("Cell segmentation will be added in phase 2.")
+DEFAULT_SEGMENT_PARAMS: dict[str, Any] = {
+    "threshold_method": "otsu",
+    "manual_threshold": 128,
+    "min_area": 500,
+    "blur_kernel": 5,
+    "morph_close": 2,
+    "morph_open": 1,
+}
+
+
+def segment_cell(frame: np.ndarray, params: dict[str, Any] | None = None) -> np.ndarray:
+    """
+    Whole-cell binary mask (uint8 0/1) via classical CV.
+
+    Used for long-axis orientation, not perfect segmentation.
+    """
+    import cv2
+
+    p = {**DEFAULT_SEGMENT_PARAMS, **(params or {})}
+    if frame.ndim == 3:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = frame.astype(np.uint8)
+
+    lo, hi = np.percentile(gray, [1.0, 99.5])
+    if hi > lo:
+        gray = np.clip((gray.astype(np.float32) - lo) * 255.0 / (hi - lo), 0, 255).astype(
+            np.uint8
+        )
+
+    k = max(3, int(p["blur_kernel"]) | 1)
+    blurred = cv2.GaussianBlur(gray, (k, k), 0)
+    method = str(p.get("threshold_method", "otsu")).lower()
+
+    if method == "adaptive":
+        block = max(11, int(p.get("adaptive_block", 31)) | 1)
+        mask = cv2.adaptiveThreshold(
+            blurred,
+            255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            block,
+            2,
+        )
+    elif method == "manual":
+        thresh = int(p.get("manual_threshold", 128))
+        _, mask = cv2.threshold(blurred, thresh, 255, cv2.THRESH_BINARY)
+    else:
+        _, mask = cv2.threshold(
+            blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+        )
+
+    close_k = max(1, int(p.get("morph_close", 2)))
+    open_k = max(1, int(p.get("morph_open", 1)))
+    kernel = np.ones((5, 5), dtype=np.uint8)
+    if close_k > 0:
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=close_k)
+    if open_k > 0:
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=open_k)
+
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        raise ValueError("No cell contour found for segmentation.")
+
+    min_area = int(p.get("min_area", 500))
+    contours = [c for c in contours if cv2.contourArea(c) >= min_area]
+    if not contours:
+        raise ValueError("No contour large enough to represent the cell.")
+
+    largest = max(contours, key=cv2.contourArea)
+    out = np.zeros(gray.shape, dtype=np.uint8)
+    cv2.drawContours(out, [largest], -1, 1, thickness=cv2.FILLED)
+    return out
 
 
 def compute_cell_axis(mask: np.ndarray) -> float:
-    """Phase 2: principal axis angle in degrees."""
-    raise NotImplementedError("Cell axis computation will be added in phase 2.")
+    """
+    Principal-axis angle in degrees to rotate the cell long axis to vertical.
+
+    Positive angle rotates counter-clockwise (OpenCV convention).
+    """
+    ys, xs = np.where(mask > 0)
+    if len(xs) < 20:
+        raise ValueError("Cell mask too small for axis estimation.")
+
+    coords = np.column_stack([xs.astype(np.float64), ys.astype(np.float64)])
+    mean = coords.mean(axis=0)
+    centered = coords - mean
+    cov = np.cov(centered.T)
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    major = eigvecs[:, int(np.argmax(eigvals))]
+    angle_rad = np.arctan2(major[1], major[0])
+    rotation_deg = float(np.degrees(np.pi / 2 - angle_rad))
+    while rotation_deg > 180:
+        rotation_deg -= 360
+    while rotation_deg < -180:
+        rotation_deg += 360
+    return rotation_deg
 
 
 def rotate_image_and_mask(
@@ -210,12 +300,42 @@ def rotate_image_and_mask(
     mask: np.ndarray | None,
     angle: float,
 ) -> tuple[np.ndarray, np.ndarray | None]:
-    """Phase 2: rotate image and optional mask."""
-    raise NotImplementedError("Rotation will be added in phase 2.")
+    """Rotate image and optional mask, expanding canvas to fit."""
+    import cv2
+
+    h, w = image.shape[:2]
+    center = (w / 2.0, h / 2.0)
+    matrix = cv2.getRotationMatrix2D(center, float(angle), 1.0)
+    cos = abs(matrix[0, 0])
+    sin = abs(matrix[0, 1])
+    new_w = int(h * sin + w * cos)
+    new_h = int(h * cos + w * sin)
+    matrix[0, 2] += (new_w / 2.0) - center[0]
+    matrix[1, 2] += (new_h / 2.0) - center[1]
+
+    rotated = cv2.warpAffine(
+        image,
+        matrix,
+        (new_w, new_h),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(0, 0, 0),
+    )
+    rotated_mask = None
+    if mask is not None:
+        rotated_mask = cv2.warpAffine(
+            mask.astype(np.uint8),
+            matrix,
+            (new_w, new_h),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+    return rotated, rotated_mask
 
 
 def apply_flip(image: np.ndarray, flip_180: bool) -> np.ndarray:
-    """Phase 2: optional 180° flip."""
+    """Optional 180° flip."""
     if not flip_180:
         return image
     import cv2
@@ -223,16 +343,71 @@ def apply_flip(image: np.ndarray, flip_180: bool) -> np.ndarray:
     return cv2.rotate(image, cv2.ROTATE_180)
 
 
+def auto_orient_cell(
+    frame: np.ndarray,
+    params: dict[str, Any] | None = None,
+) -> tuple[float, np.ndarray]:
+    """Segment cell and return rotation angle (degrees) to make long axis vertical."""
+    mask = segment_cell(frame, params)
+    angle = compute_cell_axis(mask)
+    return angle, mask
+
+
+def draw_orientation_overlay(
+    image: np.ndarray,
+    mask: np.ndarray | None,
+    axis_angle_deg: float | None = None,
+) -> np.ndarray:
+    """Draw cell contour and optional principal axis on a BGR copy."""
+    import cv2
+
+    out = image.copy()
+    if mask is not None:
+        contours, _ = cv2.findContours(
+            (mask > 0).astype(np.uint8),
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE,
+        )
+        cv2.drawContours(out, contours, -1, (0, 255, 255), 2)
+
+    if axis_angle_deg is not None:
+        h, w = out.shape[:2]
+        cx, cy = w // 2, h // 2
+        length = min(h, w) // 2
+        rad = np.radians(float(axis_angle_deg) + 90)
+        x2 = int(cx + length * np.cos(rad))
+        y2 = int(cy + length * np.sin(rad))
+        cv2.line(out, (cx, cy), (x2, y2), (255, 120, 0), 2)
+    return out
+
+
+def draw_rect_roi_preview(image: np.ndarray, roi: Any) -> np.ndarray:
+    """Draw rectangle ROI on BGR image."""
+    import cv2
+
+    from actintrack_app.orientation import RectROI
+
+    out = image.copy()
+    r = roi if isinstance(roi, RectROI) else RectROI.from_dict(roi)
+    cv2.rectangle(out, (r.x, r.y), (r.x1 - 1, r.y1 - 1), (80, 220, 120), 2)
+    cv2.putText(
+        out,
+        "Analysis ROI",
+        (r.x + 4, max(16, r.y + 16)),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.5,
+        (80, 220, 120),
+        1,
+        cv2.LINE_AA,
+    )
+    return out
+
+
 def crop_above_cutoff(image: np.ndarray, cutoff_y: int) -> np.ndarray:
-    """Phase 2: crop region above horizontal cutoff (y < cutoff_y)."""
+    """Legacy: crop region above horizontal cutoff (y < cutoff_y)."""
     h = image.shape[0]
     y = max(0, min(int(cutoff_y), h))
     return image[0:y, :].copy()
-
-
-def process_video_sample(sample: dict, rotation_angle: float, flip_180: bool, cutoff_y: int):
-    """Phase 2: batch process all video frames."""
-    raise NotImplementedError("Video batch processing will be added in phase 2.")
 
 
 def estimate_actin_velocity(cropped_frames):
