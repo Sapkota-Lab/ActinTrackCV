@@ -63,6 +63,9 @@ class ImportDataDialog(QDialog):
         project_root: Path,
         last_dir: Path,
         on_success: Callable[[], None] | None = None,
+        *,
+        preset_group: str | None = None,
+        preset_batch_name: str | None = None,
     ):
         super().__init__(parent)
         self.setWindowTitle("Import Data")
@@ -70,6 +73,8 @@ class ImportDataDialog(QDialog):
         self._root = Path(project_root).resolve()
         self._last_dir = last_dir
         self._on_success = on_success
+        self._preset_group = preset_group
+        self._preset_batch_name = preset_batch_name
         self._paths: list[Path] = []
         self._kind = ImportKind.EMPTY
 
@@ -143,8 +148,20 @@ class ImportDataDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+        if self._preset_group:
+            idx = self.combo_group.findText(self._preset_group)
+            if idx >= 0:
+                self.combo_group.setCurrentIndex(idx)
         self._on_group_changed()
+        self._select_preset_batch()
         self._refresh_file_list()
+
+    def _select_preset_batch(self) -> None:
+        if not self._preset_batch_name:
+            return
+        idx = self.combo_batch.findText(self._preset_batch_name)
+        if idx >= 0:
+            self.combo_batch.setCurrentIndex(idx)
 
     def _on_group_changed(self) -> None:
         group = self.combo_group.currentText()
@@ -158,7 +175,9 @@ class ImportDataDialog(QDialog):
             )
         for b in batches:
             self.combo_batch.addItem(str(b["batch_name"]), b)
-        if self._kind == ImportKind.VIDEO:
+        if self._preset_batch_name:
+            self._select_preset_batch()
+        elif self._kind == ImportKind.VIDEO:
             self.combo_batch.setCurrentIndex(0)
         elif current_data and isinstance(current_data, dict):
             idx = self.combo_batch.findText(str(current_data.get("batch_name", "")))
@@ -374,7 +393,12 @@ class ImportDataDialog(QDialog):
         return self.combo_batch.currentText()
 
 
-def open_import_data_dialog(window: "MainWindow") -> None:
+def open_import_data_dialog(
+    window: "MainWindow",
+    *,
+    preset_group: str | None = None,
+    preset_batch_name: str | None = None,
+) -> None:
     if window._project_root is None:
         QMessageBox.warning(window, "Import Data", "Open or create a workspace first.")
         return
@@ -384,6 +408,8 @@ def open_import_data_dialog(window: "MainWindow") -> None:
         window._project_root,
         window._last_import_dir,
         on_success=window._after_import_refresh,
+        preset_group=preset_group,
+        preset_batch_name=preset_batch_name,
     )
     if dlg.exec() == QDialog.DialogCode.Accepted:
         window._last_import_dir = dlg.last_import_dir()

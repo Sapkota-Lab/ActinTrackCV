@@ -77,6 +77,10 @@ def roi_and_crop_preview_paths(batch_dir: Path, final_name: str) -> tuple[Path, 
     )
 
 
+def raw_debug_preview_path(batch_dir: Path, final_name: str) -> Path:
+    return batch_dir / f"{final_name}_raw_debug_preview.png"
+
+
 def preview_paths(batch_dir: Path, final_name: str) -> tuple[Path, Path]:
     """Backward-compatible alias for roi + crop preview paths."""
     return roi_and_crop_preview_paths(batch_dir, final_name)

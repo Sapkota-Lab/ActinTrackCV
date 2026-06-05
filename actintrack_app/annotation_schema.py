@@ -7,8 +7,10 @@ from typing import Any
 
 from actintrack_app.orientation import OrientationState, RectROI
 from actintrack_app.roi_workflow import (
+    ORIENTED_ROI_COORDINATE_SPACE,
     original_roi_to_oriented,
     roi_from_original_dict,
+    roi_oriented_as_dict,
     roi_original_as_dict,
 )
 
@@ -33,6 +35,7 @@ def build_sample_annotation(
     oriented_dimensions: dict[str, int],
     notes: str = "",
     annotation_source: str = "manual",
+    suggestion_method: str | None = None,
     roi_method: str = "manual_rectangle",
     segmentation_method: str | None = None,
     segmentation_parameters: dict[str, Any] | None = None,
@@ -56,7 +59,7 @@ def build_sample_annotation(
         "rotation_angle_degrees": float(orientation.rotation_angle_degrees),
         "flipped_180": bool(orientation.flipped_180),
         "manual_rotation_steps": list(orientation.manual_rotation_steps),
-        "rectangle_roi": roi.as_dict(),
+        "rectangle_roi": roi_oriented_as_dict(roi),
         "roi_method": roi_method,
         **(
             roi_original_as_dict(roi_original)
@@ -64,6 +67,7 @@ def build_sample_annotation(
             else {}
         ),
         "annotation_source": annotation_source,
+        "roi_coordinate_space": ORIENTED_ROI_COORDINATE_SPACE,
         "original_dimensions": original_dimensions,
         "oriented_dimensions": oriented_dimensions,
         "segmentation_method": segmentation_method or "not_applied",
@@ -74,6 +78,8 @@ def build_sample_annotation(
         "review_status": review_status,
         "notes": notes,
     }
+    if suggestion_method:
+        ann["suggestion_method"] = suggestion_method
     if cell_mask_path:
         ann["cell_mask_path"] = cell_mask_path
     if propagated_from:

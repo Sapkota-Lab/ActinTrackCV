@@ -85,6 +85,8 @@ def collect_processed_artifacts_for_sample(
                 f"{name}_metadata.json",
                 f"{name}_orientation_preview.png",
                 f"{name}_roi_preview.png",
+                f"{name}_raw_debug_preview.png",
+                f"{name}_crop_preview.png",
             ):
                 p = batch_dir / pattern
                 if p.is_file():

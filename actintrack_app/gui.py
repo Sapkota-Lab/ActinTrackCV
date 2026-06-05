@@ -425,6 +425,13 @@ class MainWindow(QMainWindow):
         self.lbl_roi_info = QLabel("Draw a rectangle on the preview.")
         self.lbl_roi_info.setWordWrap(True)
         self.btn_auto_roi = QPushButton("Suggest ROI from F-actin Signal")
+        self.btn_auto_roi.setToolTip(
+            "Suggest ROI from F-actin Signal estimates a rectangular region with strong "
+            "visible F-actin signal. It uses image intensity/contrast patterns to find a "
+            "likely actin-rich area for annotation. This is only a starting suggestion, "
+            "not a final biological decision. Review, adjust, and approve the ROI before "
+            "processing."
+        )
         self.btn_auto_roi.clicked.connect(self._on_auto_suggest_roi)
         self.btn_clear_roi = QPushButton("Clear ROI")
         self.btn_clear_roi.clicked.connect(self._on_clear_roi)
@@ -543,6 +550,8 @@ class MainWindow(QMainWindow):
             self.lbl_roi_info.setText("No ROI selected.")
             return
         self._roi_user_adjusted = True
+        if str(self._loaded_annotation_source) == "auto_suggested":
+            self._loaded_annotation_source = "auto_suggested_adjusted"
         if self._base_frame is not None:
             check = validate_roi_for_sample(
                 roi, base_frame=self._base_frame, orientation=self._orientation
@@ -601,6 +610,8 @@ class MainWindow(QMainWindow):
         try:
             crop = detect_tracking_crop(oriented)
             self.canvas.set_rect_roi(tracking_crop_to_rect(crop))
+            self._loaded_annotation_source = "auto_suggested"
+            self._roi_user_adjusted = False
             self.lbl_roi_info.setText(
                 f"Suggested ROI (confidence {crop.confidence:.2f}) — review and adjust."
             )
@@ -631,11 +642,20 @@ class MainWindow(QMainWindow):
 
     def _annotation_source_for_save(self) -> str:
         src = str(self._loaded_annotation_source or "manual")
-        if self._roi_user_adjusted and src in ("propagated", "propagated_adjusted"):
-            return "propagated_adjusted"
-        if self._roi_user_adjusted and src != "manual":
-            return "propagated_adjusted"
+        if self._roi_user_adjusted:
+            if src in ("auto_suggested", "auto_suggested_adjusted"):
+                return "auto_suggested_adjusted"
+            if src in ("propagated", "propagated_adjusted"):
+                return "propagated_adjusted"
+            if src != "manual":
+                return "propagated_adjusted"
         return src if src else "manual"
+
+    def _suggestion_method_for_save(self) -> str | None:
+        src = self._annotation_source_for_save()
+        if src.startswith("auto_suggested"):
+            return "f_actin_signal"
+        return None
 
     def _current_annotation_dict(self, *, status: str) -> dict[str, Any]:
         assert self._current_sample is not None and self._base_frame is not None
@@ -647,13 +667,20 @@ class MainWindow(QMainWindow):
         assert oriented is not None
         oh, ow = oriented.shape[:2]
         bh, bw = self._base_frame.shape[:2]
+        ann_src = self._annotation_source_for_save()
         review = str(self._current_sample.get("review_status", "approved"))
         requires_review = status == STATUS_ROI_PROPAGATED
-        if status == STATUS_ROI_MARKED and self._annotation_source_for_save().startswith(
-            "propagated"
-        ):
+        if status == STATUS_ROI_MARKED and ann_src.startswith("auto_suggested"):
             review = "pending"
             requires_review = True
+        elif status == STATUS_ROI_MARKED and ann_src.startswith("propagated"):
+            review = "pending"
+            requires_review = True
+        roi_method = (
+            "f_actin_signal_suggestion"
+            if ann_src.startswith("auto_suggested")
+            else "manual_rectangle"
+        )
         return build_sample_annotation(
             sample_id=str(self._current_sample["sample_id"]),
             group=str(self._current_sample["group"]),
@@ -668,8 +695,9 @@ class MainWindow(QMainWindow):
             original_dimensions={"width": bw, "height": bh},
             oriented_dimensions={"width": ow, "height": oh},
             notes=self.txt_notes.toPlainText().strip(),
-            annotation_source=self._annotation_source_for_save(),
-            roi_method="manual_rectangle",
+            annotation_source=ann_src,
+            suggestion_method=self._suggestion_method_for_save(),
+            roi_method=roi_method,
             segmentation_method="manual",
             segmentation_parameters={},
             status=status,
@@ -974,9 +1002,15 @@ class MainWindow(QMainWindow):
         save_sample_crop_annotation(
             self._project_root / METADATA_DIR / CROP_METADATA_JSON, sid, ann
         )
+        csv_update: dict[str, str] = {
+            "sample_id": sid,
+            "processing_status": status,
+        }
+        if status == STATUS_ROI_APPROVED:
+            csv_update["review_status"] = "approved"
         update_samples_csv(
             self._project_root / METADATA_DIR / SAMPLES_CSV,
-            {"sample_id": sid, "processing_status": status},
+            csv_update,
         )
         self._refresh_sample_list()
         self._status(f"{sid} → {status}")
@@ -1481,7 +1515,9 @@ class MainWindow(QMainWindow):
             oriented = self._oriented_frame()
             if oriented is not None:
                 self.canvas.set_rect_roi(roi.clamp(oriented.shape[1], oriented.shape[0]))
-        src = ann.get("annotation_source", "saved")
+        self._loaded_annotation_source = str(ann.get("annotation_source", "manual"))
+        self._roi_user_adjusted = False
+        src = self._loaded_annotation_source
         self.lbl_roi_info.setText(f"Loaded annotation ({src}).")
         self._update_orientation_label()
 
@@ -1533,6 +1569,8 @@ class MainWindow(QMainWindow):
                     crop = detect_tracking_crop(oriented)
                     if crop.confidence >= AUTO_APPLY_ROI_CONFIDENCE:
                         self.canvas.set_rect_roi(tracking_crop_to_rect(crop))
+                        self._loaded_annotation_source = "auto_suggested"
+                        self._roi_user_adjusted = False
                 except ValueError:
                     pass
 
@@ -1714,6 +1752,11 @@ class MainWindow(QMainWindow):
             group = str(meta.get("group", self._ensure_filter_group_valid()))
             batch_name = str(meta.get("batch_name", ""))
             menu.addAction(
+                "Import Data Into This Batch",
+                lambda: self._ctx_import_into_batch(group, batch_name),
+            )
+            menu.addSeparator()
+            menu.addAction(
                 "Delete Batch",
                 lambda: self._ctx_delete_batch(group, batch_name),
             )
@@ -1731,6 +1774,18 @@ class MainWindow(QMainWindow):
 
         if not menu.isEmpty():
             menu.exec(self.list_samples.mapToGlobal(pos))
+
+    def _ctx_import_into_batch(self, group: str, batch_name: str) -> None:
+        if not group or not batch_name:
+            QMessageBox.warning(
+                self, "Import Data", "Could not determine the batch for import."
+            )
+            return
+        open_import_data_dialog(
+            self,
+            preset_group=group,
+            preset_batch_name=batch_name,
+        )
 
     def _ctx_purge_file_annotations(self, sample_id: str) -> None:
         if self._project_root is None:
@@ -2042,7 +2097,13 @@ class MainWindow(QMainWindow):
             self,
             "About ActinTrackCV",
             "ActinTrackCV — Arabidopsis F-actin fluorescence microscopy: 2D preprocessing, "
-            "orientation, ROI annotation, and cropped export for actin cable analysis.",
+            "orientation, ROI annotation, and cropped export for actin cable analysis.\n\n"
+            "Suggest ROI from F-actin Signal is a computer vision helper that looks for areas "
+            "in the image where bright, filament-like F-actin signal is strongest or most "
+            "structured. It proposes a rectangular ROI that may contain usable actin cables "
+            "while avoiding low-signal or blurry regions. The suggested ROI is not guaranteed "
+            "to be correct. Treat it as a draft annotation that you can move, resize, approve, "
+            "or reject.",
         )
 
     def _confirm_project_root_if_source_folder(self, root: Path) -> Optional[Path]:

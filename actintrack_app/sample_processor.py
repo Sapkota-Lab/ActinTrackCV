@@ -14,6 +14,7 @@ from actintrack_app.export_naming import (
     processed_image_path,
     processed_sample_metadata_path,
     processed_video_path,
+    raw_debug_preview_path,
     roi_and_crop_preview_paths,
 )
 from actintrack_app.orientation import (
@@ -206,11 +207,16 @@ def process_sample_to_disk(
     roi_preview_path, crop_preview_path = roi_and_crop_preview_paths(
         out_dir, final_export_name
     )
+    debug_raw_path = raw_debug_preview_path(out_dir, final_export_name)
     roi_vis = draw_rect_roi_preview(
+        oriented_ref, roi_ref.clamp(oriented_ref.shape[1], oriented_ref.shape[0])
+    )
+    cv2.imwrite(str(roi_preview_path), roi_vis)
+    raw_vis = draw_rect_roi_preview(
         ref_frame,
         roi_original.clamp(ref_frame.shape[1], ref_frame.shape[0]),
     )
-    cv2.imwrite(str(roi_preview_path), roi_vis)
+    cv2.imwrite(str(debug_raw_path), raw_vis)
     cropped_ref = crop_rect_roi(oriented_ref, roi_ref)
     cv2.imwrite(str(crop_preview_path), cropped_ref)
 
@@ -246,6 +252,7 @@ def process_sample_to_disk(
         "output_file": str(output_file),
         "roi_preview": str(roi_preview_path),
         "crop_preview": str(crop_preview_path),
+        "raw_debug_preview": str(debug_raw_path),
         "metadata_file": str(
             processed_sample_metadata_path(out_dir, final_export_name)
         ),

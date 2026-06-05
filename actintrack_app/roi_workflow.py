@@ -33,6 +33,7 @@ from actintrack_app.utils import (
 from actintrack_app.video_processing import MediaLoadError, load_media_frame
 
 ROI_COORDINATE_SPACE = "original_frame_pixels"
+ORIENTED_ROI_COORDINATE_SPACE = "oriented_frame_pixels"
 MIN_ROI_WIDTH = 8
 MIN_ROI_HEIGHT = 8
 MIN_ROI_AREA_FRACTION = 0.001
@@ -172,6 +173,13 @@ def roi_original_as_dict(roi: RectROI) -> dict[str, Any]:
     }
 
 
+def roi_oriented_as_dict(roi: RectROI) -> dict[str, Any]:
+    return {
+        **roi.as_dict(),
+        "roi_coordinate_space": ORIENTED_ROI_COORDINATE_SPACE,
+    }
+
+
 def roi_from_original_dict(data: dict[str, Any]) -> RectROI | None:
     if data.get("roi_coordinate_space") != ROI_COORDINATE_SPACE:
         if "roi_x" not in data:
@@ -258,15 +266,27 @@ def crop_image_to_roi(image: np.ndarray, roi: RectROI) -> np.ndarray:
 
 
 def save_roi_preview(
-    reference_frame: np.ndarray,
-    roi_original: RectROI,
+    oriented_frame: np.ndarray,
+    roi_oriented: RectROI,
     path: Path,
+    *,
+    raw_frame: np.ndarray | None = None,
+    roi_original: RectROI | None = None,
+    raw_debug_path: Path | None = None,
 ) -> None:
-    vis = draw_rect_roi_preview(reference_frame, roi_original.clamp(
-        reference_frame.shape[1], reference_frame.shape[0]
-    ))
+    """Save full oriented reference frame with ROI overlay (matches on-screen view)."""
+    oh, ow = oriented_frame.shape[:2]
+    vis = draw_rect_roi_preview(
+        oriented_frame, roi_oriented.clamp(ow, oh)
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(path), vis)
+    if raw_debug_path is not None and raw_frame is not None and roi_original is not None:
+        bh, bw = raw_frame.shape[:2]
+        raw_vis = draw_rect_roi_preview(
+            raw_frame, roi_original.clamp(bw, bh)
+        )
+        cv2.imwrite(str(raw_debug_path), raw_vis)
 
 
 def save_crop_preview(cropped: np.ndarray, path: Path) -> None:
@@ -297,9 +317,12 @@ def build_export_metadata(
     output_path: Path,
 ) -> dict[str, Any]:
     orig = annotation.get("original_dimensions", process_result.get("original_dimensions", {}))
+    oriented = process_result.get("oriented_dimensions", annotation.get("oriented_dimensions", {}))
     cropped = process_result.get("cropped_dimensions", {})
     ow = int(orig.get("width", 0))
     oh = int(orig.get("height", 0))
+    orient_w = int(oriented.get("width", 0))
+    orient_h = int(oriented.get("height", 0))
     meta = {
         "sample_id": str(sample_row.get("sample_id", annotation.get("sample_id", ""))),
         "group": str(sample_row.get("group", annotation.get("group", ""))),
@@ -311,9 +334,11 @@ def build_export_metadata(
         "is_video": str(sample_row.get("is_video", "")).lower() == "true",
         "reference_frame_index": int(annotation.get("reference_frame_index", 0)),
         **roi_original_as_dict(roi_original),
-        "rectangle_roi_oriented": roi_oriented.as_dict(),
+        "rectangle_roi_oriented": roi_oriented_as_dict(roi_oriented),
         "original_frame_width": ow,
         "original_frame_height": oh,
+        "oriented_frame_width": orient_w,
+        "oriented_frame_height": orient_h,
         "cropped_width": int(cropped.get("width", 0)),
         "cropped_height": int(cropped.get("height", 0)),
         "auto_export_name": str(sample_row.get("auto_export_name", "")),
@@ -327,7 +352,11 @@ def build_export_metadata(
         "frame_count_exported": process_result.get("frame_count"),
         "rotation_angle_degrees": float(annotation.get("rotation_angle_degrees", 0)),
         "flipped_180": bool(annotation.get("flipped_180", False)),
+        "roi_coordinate_space_oriented": ORIENTED_ROI_COORDINATE_SPACE,
+        "roi_coordinate_space_original": ROI_COORDINATE_SPACE,
     }
+    if annotation.get("suggestion_method"):
+        meta["suggestion_method"] = str(annotation["suggestion_method"])
     if meta["custom_export_name"] == "":
         meta["custom_export_name"] = None
     return meta
@@ -346,8 +375,17 @@ def list_output_paths_for_export(
         paths.append(processed_video_path(out_dir, final_export_name))
     else:
         paths.append(processed_image_path(out_dir, final_export_name))
+    from actintrack_app.export_naming import raw_debug_preview_path
+
     roi_p, crop_p = roi_and_crop_preview_paths(out_dir, final_export_name)
-    paths.extend([roi_p, crop_p, processed_sample_metadata_path(out_dir, final_export_name)])
+    paths.extend(
+        [
+            roi_p,
+            crop_p,
+            raw_debug_preview_path(out_dir, final_export_name),
+            processed_sample_metadata_path(out_dir, final_export_name),
+        ]
+    )
     return paths
 
 
