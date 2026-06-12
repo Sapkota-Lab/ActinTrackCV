@@ -27,7 +27,7 @@ from actintrack_app.sample_processor import process_sample_to_disk, write_proces
 from actintrack_app.utils import (
     RAW_MICROSCOPY_EXTENSIONS,
     STATUS_PROCESSED,
-    STATUS_ROI_APPROVED,
+    STATUS_ROI_MARKED,
     VIDEO_EXTENSIONS,
 )
 from actintrack_app.video_processing import MediaLoadError, load_media_frame
@@ -521,7 +521,7 @@ def process_batch_approved_rois(
 ) -> tuple[list[str], list[str], BatchProcessReport]:
     """
     Return (approved_ids, skipped_ids, report) for pre-export summary.
-    Only processes samples with roi_approved status and valid saved ROI.
+    Only processes samples with roi_marked status and valid saved ROI.
     """
     import pandas as pd
 
@@ -541,7 +541,7 @@ def process_batch_approved_rois(
     for _, row in sub.iterrows():
         sid = str(row["sample_id"])
         status = str(row.get("processing_status", ""))
-        if status != STATUS_ROI_APPROVED:
+        if status != STATUS_ROI_MARKED:
             skipped_ids.append(sid)
             continue
         ann = get_sample_annotation(root, sid)

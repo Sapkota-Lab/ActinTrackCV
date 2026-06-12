@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSlider,
     QSpinBox,
     QSplitter,
@@ -121,6 +122,23 @@ from actintrack_app.project_manager import (
     is_valid_project,
 )
 from actintrack_app.motion_index import MotionIndexParams
+from actintrack_app.optical_flow_motion_index import (
+    OpticalFlowResult,
+    OpticalFlowSettings,
+    build_optical_flow_fingerprint,
+    compute_optical_flow_motion_index,
+    result_from_dict,
+    result_to_dict,
+)
+from actintrack_app.optical_flow_overlay import (
+    OpticalFlowFlowCache,
+    OpticalFlowVisualizationSettings,
+    build_flow_cache,
+    format_optical_flow_qc,
+    get_flow_arrows_for_frame,
+    render_optical_flow_overlay,
+    resolve_qc_status,
+)
 from actintrack_app.preview_workflow import (
     CroppedPreviewAnalysis,
     analyze_cropped_preview,
@@ -161,7 +179,8 @@ APP_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SOURCE_ROOT = APP_ROOT / "raw_source"
 AUTO_APPLY_ROI_CONFIDENCE = 0.15
 DRAFT_TRACKING_DIR = "draft_tracking"
-TRACKING_DEBOUNCE_MS = 3000
+METRIC_DEBOUNCE_MS = 5000
+_METRIC_ANALYSIS_VIEW_LABEL = "Metric Analysis View"
 
 _ADVANCED_SAMPLE_STATUSES = frozenset(
     {
@@ -189,6 +208,16 @@ class _TrackingRunSnapshot:
     run_token: int
 
 
+@dataclass(frozen=True)
+class _OpticalFlowRunSnapshot:
+    sample_id: str
+    roi_key: tuple[int, int, int, int]
+    settings_key: tuple[tuple[str, Any], ...]
+    orientation_key: tuple[float, bool, bool]
+    video_path: str
+    run_token: int
+
+
 @dataclass
 class SampleTrackingResultView:
     """Display-ready tracking/index values for one sample."""
@@ -200,6 +229,35 @@ class SampleTrackingResultView:
     tracks_requested: int = 0
     valid_steps: int = 0
     failure_reason: str = ""
+
+
+@dataclass
+class OpticalFlowResultView:
+    """Display-ready optical-flow motion index values for one sample."""
+
+    status: str  # success, failed, none
+    general_movement: Optional[float] = None
+    downward_motion: Optional[float] = None
+    net_y_velocity: Optional[float] = None
+    directionality_ratio: Optional[float] = None
+    valid_pixel_fraction: Optional[float] = None
+    saturated_pixel_fraction: Optional[float] = None
+    failure_reason: str = ""
+
+def _optional_gui_float(value: Any) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _fmt_optional_float(value: Optional[float], *, places: int = 4) -> str:
+    if value is None:
+        return "—"
+    return f"{value:.{places}f}"
+
 
 STATUS_COLORS = {
     STATUS_IMPORTED: QColor("#bbbbbb"),
@@ -311,21 +369,27 @@ class MainWindow(QMainWindow):
         self._roi_autosave_pending = False
         self._tracking_results_by_sample: dict[str, CroppedPreviewAnalysis] = {}
         self._tracking_result_stale_by_sample: dict[str, bool] = {}
-        self._tracking_refresh_timer = QTimer(self)
-        self._tracking_refresh_timer.setSingleShot(True)
-        self._tracking_refresh_timer.setInterval(TRACKING_DEBOUNCE_MS)
-        self._tracking_refresh_timer.timeout.connect(
-            self._on_settings_tracking_debounce_fired
-        )
-        self._roi_tracking_debounce_timer = QTimer(self)
-        self._roi_tracking_debounce_timer.setSingleShot(True)
-        self._roi_tracking_debounce_timer.setInterval(TRACKING_DEBOUNCE_MS)
-        self._roi_tracking_debounce_timer.timeout.connect(
-            self._on_roi_tracking_debounce_fired
-        )
         self._pending_tracking_snapshot: Optional[_TrackingRunSnapshot] = None
         self._tracking_run_token = 0
         self._tracking_job_running = False
+        self._cropped_metric_mode = "template"
+        self._metric_analysis_view_active = False
+        self._optical_flow_results_by_sample: dict[str, OpticalFlowResult] = {}
+        self._optical_flow_stale_by_sample: dict[str, bool] = {}
+        self._optical_flow_run_token = 0
+        self._optical_flow_job_running = False
+        self._pending_optical_flow_snapshot: Optional[_OpticalFlowRunSnapshot] = None
+        self._metric_debounce_timer = QTimer(self)
+        self._metric_debounce_timer.setSingleShot(True)
+        self._metric_debounce_timer.setInterval(METRIC_DEBOUNCE_MS)
+        self._metric_debounce_timer.timeout.connect(self._on_metric_debounce_fired)
+        self._metric_settings_timer = QTimer(self)
+        self._metric_settings_timer.setSingleShot(True)
+        self._metric_settings_timer.setInterval(METRIC_DEBOUNCE_MS)
+        self._metric_settings_timer.timeout.connect(
+            self._on_metric_settings_debounce_fired
+        )
+        self._of_flow_caches: dict[str, OpticalFlowFlowCache] = {}
 
         self._build_ui()
         self._set_tracking_settings_editable(False)
@@ -338,7 +402,8 @@ class MainWindow(QMainWindow):
         layout = QHBoxLayout(central)
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self._build_left_sidebar())
-        preview_page = QWidget()
+        self._preview_page = QWidget()
+        preview_page = self._preview_page
         center_layout = QVBoxLayout(preview_page)
         self.lbl_preview_mode = QLabel(
             "Full Sample Preview — orient the data and draw a rectangle around "
@@ -347,18 +412,36 @@ class MainWindow(QMainWindow):
         self.lbl_preview_mode.setWordWrap(True)
         center_layout.addWidget(self.lbl_preview_mode)
 
+        metric_mode_row = QHBoxLayout()
+        self.lbl_metric_mode = QLabel("Preview mode:")
+        self.combo_metric_mode = QComboBox()
+        self.combo_metric_mode.addItem("Template Tracking", "template")
+        self.combo_metric_mode.addItem("Optical Flow (Draft)", "optical_flow")
+        self.combo_metric_mode.currentIndexChanged.connect(self._on_cropped_metric_mode_changed)
+        metric_mode_row.addWidget(self.lbl_metric_mode)
+        metric_mode_row.addWidget(self.combo_metric_mode)
+        metric_mode_row.addStretch()
+        self._metric_mode_widgets = (
+            self.lbl_metric_mode,
+            self.combo_metric_mode,
+        )
+        for widget in self._metric_mode_widgets:
+            widget.hide()
+        center_layout.addLayout(metric_mode_row)
+
         self.canvas = ImageCanvas(self)
         center_layout.addWidget(self.canvas, stretch=1)
 
         preview_crop_row = QHBoxLayout()
         preview_crop_row.addStretch()
-        self.btn_preview_crop = self._tool_button(
-            "Preview Cropped ROI",
-            "Show cropped ROI with draft tracking overlay in the main preview window.",
-            self._on_preview_crop,
+        self.btn_metric_analysis = self._tool_button(
+            _METRIC_ANALYSIS_VIEW_LABEL,
+            "Open the cropped ROI metric analysis view with Template Tracking "
+            "and Optical Flow metrics, overlay, and playback.",
+            self._on_show_metric_analysis_view,
         )
-        self.btn_preview_crop.hide()
-        preview_crop_row.addWidget(self.btn_preview_crop)
+        self.btn_metric_analysis.hide()
+        preview_crop_row.addWidget(self.btn_metric_analysis)
         preview_crop_row.addStretch()
         center_layout.addLayout(preview_crop_row)
 
@@ -503,6 +586,7 @@ class MainWindow(QMainWindow):
 
         stack.addWidget(self._right_tabs)
         stack.addWidget(self._build_tracking_settings_page())
+        stack.addWidget(self._build_optical_flow_settings_page())
         self._right_stack = stack
         return stack
 
@@ -592,29 +676,37 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.lbl_auto_export_name)
         return box
 
+    @staticmethod
+    def _configure_orient_roi_control(widget: QWidget) -> None:
+        widget.setSizePolicy(
+            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Fixed,
+        )
+        if isinstance(widget, QDoubleSpinBox):
+            widget.setMaximumWidth(72)
+
     def _build_unified_orient_roi_panel(self) -> QGroupBox:
         box = QGroupBox("Orient and ROI")
         layout = QVBoxLayout(box)
         layout.setSpacing(8)
 
-        row1 = QHBoxLayout()
-        self.btn_rot_left = QPushButton("Rotate 90° Left")
-        self.btn_rot_right = QPushButton("Rotate 90° Right")
-        self.btn_rot_left.clicked.connect(lambda: self._rotate_by(90))
-        self.btn_rot_right.clicked.connect(lambda: self._rotate_by(-90))
-        row1.addWidget(self.btn_rot_left)
-        row1.addWidget(self.btn_rot_right)
-        layout.addLayout(row1)
-
         custom = QHBoxLayout()
-        custom.addWidget(QLabel("Rotation Angle:"))
+        angle_label = QLabel("Rotation:")
+        angle_label.setSizePolicy(
+            QSizePolicy.Policy.Minimum,
+            QSizePolicy.Policy.Fixed,
+        )
+        custom.addWidget(angle_label)
         self.spin_custom_angle = QDoubleSpinBox()
         self.spin_custom_angle.setRange(-180, 180)
         self.spin_custom_angle.setDecimals(1)
-        self.btn_apply_custom = QPushButton("Apply Angle")
+        self._configure_orient_roi_control(self.spin_custom_angle)
+        self.btn_apply_custom = QPushButton("Apply")
         self.btn_apply_custom.clicked.connect(self._on_apply_custom_angle)
+        self._configure_orient_roi_control(self.btn_apply_custom)
         custom.addWidget(self.spin_custom_angle)
         custom.addWidget(self.btn_apply_custom)
+        custom.addStretch()
         layout.addLayout(custom)
 
         self.chk_mirror_y = QCheckBox("Mirror Y-Axis")
@@ -630,15 +722,6 @@ class MainWindow(QMainWindow):
         orient_extras.addWidget(self.btn_flip)
         orient_extras.addWidget(self.btn_reset_orientation)
         layout.addLayout(orient_extras)
-
-        self.lbl_orientation = QLabel("Angle: 0°  Flip: no")
-        self.lbl_orientation.setWordWrap(True)
-        self.lbl_orientation.setStyleSheet("color: #888; font-size: 11px;")
-        layout.addWidget(self.lbl_orientation)
-
-        self.lbl_roi_info = QLabel("Draw a rectangle on the preview.")
-        self.lbl_roi_info.setWordWrap(True)
-        layout.addWidget(self.lbl_roi_info)
 
         self.btn_auto_roi = QPushButton("Suggest ROI from F-actin Signal")
         self.btn_auto_roi.setToolTip(
@@ -664,21 +747,6 @@ class MainWindow(QMainWindow):
         self.lbl_roi_save_status.setWordWrap(True)
         self._set_roi_save_status("No ROI saved yet", saved=False)
         layout.addWidget(self.lbl_roi_save_status)
-
-        review = QHBoxLayout()
-        self.btn_approve = self._tool_button(
-            "Approve ROI",
-            "Mark the current ROI as approved for export.",
-            self._on_approve_roi,
-        )
-        self.btn_reject = self._tool_button(
-            "Reject ROI",
-            "Remove the ROI annotation and reset sample status.",
-            self._on_reject_roi,
-        )
-        review.addWidget(self.btn_approve)
-        review.addWidget(self.btn_reject)
-        layout.addLayout(review)
         return box
 
     @staticmethod
@@ -738,6 +806,7 @@ class MainWindow(QMainWindow):
             "Number of future frames to check if a point is temporarily lost."
         )
 
+        
         self.spin_track_mpp = QDoubleSpinBox()
         self.spin_track_mpp.setRange(0.001, 10.0)
         self.spin_track_mpp.setDecimals(4)
@@ -786,7 +855,7 @@ class MainWindow(QMainWindow):
     def _build_tracking_settings_form(self) -> QGroupBox:
         box = QGroupBox("Advanced Tracking Settings")
         box.setToolTip(
-            "Draft point-tracking parameters used when Preview Cropped ROI runs."
+            "Draft point-tracking parameters used in Metric Analysis View."
         )
         layout = QVBoxLayout(box)
         layout.setSpacing(10)
@@ -843,8 +912,187 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._build_tracking_settings_form(), stretch=1)
         return page
 
+    def _create_optical_flow_setting_widgets(self) -> None:
+        defaults = OpticalFlowSettings()
+        self.spin_of_mask_percentile = QDoubleSpinBox()
+        self.spin_of_mask_percentile.setRange(0.0, 100.0)
+        self.spin_of_mask_percentile.setDecimals(1)
+        self.spin_of_mask_percentile.setValue(defaults.mask_percentile)
+        self.spin_of_mask_percentile.setToolTip(
+            "Include pixels brighter than this percentile in optical-flow averaging."
+        )
+
+        self.combo_of_blur = QComboBox()
+        self.combo_of_blur.addItem("Off (0)", 0)
+        self.combo_of_blur.addItem("3", 3)
+        self.combo_of_blur.addItem("5", 5)
+        self.combo_of_blur.setCurrentIndex(1)
+        self.combo_of_blur.setToolTip("Light Gaussian blur applied before optical flow.")
+
+        self.spin_of_pyr_scale = QDoubleSpinBox()
+        self.spin_of_pyr_scale.setRange(0.01, 0.99)
+        self.spin_of_pyr_scale.setDecimals(2)
+        self.spin_of_pyr_scale.setSingleStep(0.05)
+        self.spin_of_pyr_scale.setValue(defaults.pyr_scale)
+
+        self.spin_of_levels = QSpinBox()
+        self.spin_of_levels.setRange(1, 8)
+        self.spin_of_levels.setValue(defaults.levels)
+
+        self.spin_of_winsize = QSpinBox()
+        self.spin_of_winsize.setRange(3, 99)
+        self.spin_of_winsize.setSingleStep(2)
+        self.spin_of_winsize.setValue(defaults.winsize)
+
+        self.spin_of_iterations = QSpinBox()
+        self.spin_of_iterations.setRange(1, 20)
+        self.spin_of_iterations.setValue(defaults.iterations)
+
+        self.spin_of_poly_n = QSpinBox()
+        self.spin_of_poly_n.setRange(3, 15)
+        self.spin_of_poly_n.setSingleStep(2)
+        self.spin_of_poly_n.setValue(defaults.poly_n)
+
+        self.spin_of_poly_sigma = QDoubleSpinBox()
+        self.spin_of_poly_sigma.setRange(0.1, 5.0)
+        self.spin_of_poly_sigma.setDecimals(2)
+        self.spin_of_poly_sigma.setValue(defaults.poly_sigma)
+
+        viz_defaults = OpticalFlowVisualizationSettings()
+        self.chk_show_of_overlay = QCheckBox("Show Optical Flow Overlay")
+        self.chk_show_of_overlay.setChecked(True)
+        self.chk_show_of_overlay.setToolTip(
+            "Draw sampled optical-flow arrows on the cropped ROI preview."
+        )
+        self.chk_show_of_overlay.toggled.connect(self._on_show_of_overlay_changed)
+
+        self.spin_of_arrow_spacing = QSpinBox()
+        self.spin_of_arrow_spacing.setRange(8, 40)
+        self.spin_of_arrow_spacing.setValue(viz_defaults.arrow_spacing_px)
+        self.spin_of_arrow_spacing.valueChanged.connect(self._on_of_viz_setting_changed)
+
+        self.spin_of_arrow_scale = QDoubleSpinBox()
+        self.spin_of_arrow_scale.setRange(0.1, 20.0)
+        self.spin_of_arrow_scale.setDecimals(1)
+        self.spin_of_arrow_scale.setSingleStep(0.5)
+        self.spin_of_arrow_scale.setValue(viz_defaults.arrow_scale)
+        self.spin_of_arrow_scale.valueChanged.connect(self._on_of_viz_setting_changed)
+
+        self.lbl_of_qc = QLabel("QC: —")
+        self.lbl_of_qc.setWordWrap(True)
+        self.lbl_of_qc.setStyleSheet("color: #aaa; font-size: 11px;")
+
+        self._optical_flow_metric_widgets = (
+            self.spin_of_mask_percentile,
+            self.combo_of_blur,
+            self.spin_of_pyr_scale,
+            self.spin_of_levels,
+            self.spin_of_winsize,
+            self.spin_of_iterations,
+            self.spin_of_poly_n,
+            self.spin_of_poly_sigma,
+        )
+        self._optical_flow_setting_widgets = (
+            *self._optical_flow_metric_widgets,
+            self.chk_show_of_overlay,
+            self.spin_of_arrow_spacing,
+            self.spin_of_arrow_scale,
+        )
+        for widget in self._optical_flow_metric_widgets:
+            self._configure_tracking_field(widget, full_column=True)
+            if isinstance(widget, (QSpinBox, QDoubleSpinBox)):
+                widget.valueChanged.connect(self._on_optical_flow_setting_changed)
+            elif isinstance(widget, QComboBox):
+                widget.currentIndexChanged.connect(self._on_optical_flow_setting_changed)
+        for widget in (self.spin_of_arrow_spacing, self.spin_of_arrow_scale):
+            self._configure_tracking_field(widget, full_column=True)
+
+    def _build_optical_flow_overlay_panel(self) -> QGroupBox:
+        box = QGroupBox("Optical Flow Overlay")
+        layout = QVBoxLayout(box)
+        layout.setSpacing(6)
+        layout.setContentsMargins(8, 10, 8, 6)
+        self.chk_show_of_overlay.setStyleSheet("font-size: 11px;")
+        layout.addWidget(self.chk_show_of_overlay)
+        self._add_tracking_setting_row(
+            layout,
+            "Arrow Spacing (px)",
+            self.spin_of_arrow_spacing,
+            "Grid spacing for sampled flow arrows.",
+        )
+        self._add_tracking_setting_row(
+            layout,
+            "Arrow Scale",
+            self.spin_of_arrow_scale,
+            "Multiplier for arrow length relative to flow magnitude.",
+        )
+        return box
+
+    def _build_optical_flow_qc_panel(self) -> QGroupBox:
+        box = QGroupBox("Optical Flow QC")
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(8, 10, 8, 6)
+        layout.addWidget(self.lbl_of_qc)
+        return box
+
+    def _build_optical_flow_settings_form(self) -> QGroupBox:
+        box = QGroupBox("Optical Flow Advanced Settings")
+        box.setToolTip(
+            "Dense Farnebäck optical-flow parameters used for the draft motion index."
+        )
+        layout = QVBoxLayout(box)
+        layout.setSpacing(10)
+        layout.setContentsMargins(8, 12, 8, 8)
+        rows: list[tuple[str, QWidget, str]] = [
+            ("Mask Percentile", self.spin_of_mask_percentile, self.spin_of_mask_percentile.toolTip()),
+            ("Gaussian Blur Kernel", self.combo_of_blur, self.combo_of_blur.toolTip()),
+            ("Farnebäck pyr_scale", self.spin_of_pyr_scale, ""),
+            ("Farnebäck levels", self.spin_of_levels, ""),
+            ("Farnebäck winsize", self.spin_of_winsize, ""),
+            ("Farnebäck iterations", self.spin_of_iterations, ""),
+            ("Farnebäck poly_n", self.spin_of_poly_n, ""),
+            ("Farnebäck poly_sigma", self.spin_of_poly_sigma, ""),
+        ]
+        for label_text, widget, tooltip in rows:
+            self._add_tracking_setting_row(layout, label_text, widget, tooltip)
+        units_hint = QLabel(
+            "Microns per Pixel and Seconds per Frame are shared with Template "
+            "Tracking settings on the other preview mode panel."
+        )
+        units_hint.setWordWrap(True)
+        units_hint.setStyleSheet("color: #888; font-size: 11px;")
+        layout.addWidget(units_hint)
+        return box
+
+    def _build_optical_flow_settings_page(self) -> QWidget:
+        self._create_optical_flow_setting_widgets()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(10)
+        hint = QLabel(
+            "Edit optical-flow parameters below while previewing the cropped ROI. "
+            "Changes auto-recompute the draft optical-flow motion index."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #888; font-size: 11px;")
+        layout.addWidget(hint)
+        layout.addWidget(self._build_optical_flow_settings_form())
+        layout.addWidget(self._build_optical_flow_overlay_panel())
+        layout.addWidget(self._build_optical_flow_qc_panel())
+        layout.addStretch()
+        scroll.setWidget(content)
+        page = QWidget()
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.addWidget(scroll)
+        return page
+
     def _build_tracking_result_panel(self) -> QGroupBox:
-        box = QGroupBox("Tracking Result: No sample selected")
+        box = QGroupBox("Tracking / Motion Index Results: No sample selected")
         self.grp_tracking_result = box
         layout = QVBoxLayout(box)
         self.lbl_tracking_result = QLabel("Not generated yet")
@@ -886,9 +1134,11 @@ class MainWindow(QMainWindow):
     ) -> None:
         """Stop playback and clear cropped/tracking preview when context changes."""
         self._preview_pause()
-        self._tracking_refresh_timer.stop()
-        self._roi_tracking_debounce_timer.stop()
+        self._metric_debounce_timer.stop()
+        self._metric_settings_timer.stop()
         self._cancel_pending_debounced_tracking()
+        self._set_metric_mode_widgets_visible(False)
+        self._clear_of_flow_cache()
         self._preview_frame_index = 0
         self._cropped_preview = None
         self._preview_playing = False
@@ -919,10 +1169,40 @@ class MainWindow(QMainWindow):
             self.lbl_preview_mode.setText(self._FULL_PREVIEW_HINT)
         if self._current_sample_id is None:
             self.update_tracking_result_panel()
-        self._update_preview_crop_button_visibility()
+        self._update_metric_analysis_button_visibility()
 
     def _show_tracking_settings_view(self) -> None:
         self._right_stack.setCurrentIndex(1)
+
+    def _show_optical_flow_settings_view(self) -> None:
+        self._right_stack.setCurrentIndex(2)
+
+    def _show_cropped_metric_settings_view(self) -> None:
+        if self._cropped_metric_mode == "optical_flow":
+            self._show_optical_flow_settings_view()
+        else:
+            self._show_tracking_settings_view()
+
+    def _set_metric_mode_widgets_visible(self, visible: bool) -> None:
+        for widget in getattr(self, "_metric_mode_widgets", ()):
+            widget.setVisible(visible)
+
+    def _sync_metric_mode_combo(self) -> None:
+        idx = self.combo_metric_mode.findData(self._cropped_metric_mode)
+        if idx >= 0:
+            self.combo_metric_mode.blockSignals(True)
+            self.combo_metric_mode.setCurrentIndex(idx)
+            self.combo_metric_mode.blockSignals(False)
+
+    def _on_cropped_metric_mode_changed(self, _index: int) -> None:
+        mode = self.combo_metric_mode.currentData()
+        if mode not in ("template", "optical_flow"):
+            return
+        self._cropped_metric_mode = str(mode)
+        if self._preview_mode == "cropped_tracking":
+            self._show_cropped_metric_settings_view()
+            self._update_optical_flow_qc_readout()
+            self._show_cropped_preview_frame(self._preview_frame_index)
 
     def _show_roi_controls_view(self) -> None:
         self._right_stack.setCurrentIndex(0)
@@ -971,6 +1251,9 @@ class MainWindow(QMainWindow):
         widgets = getattr(self, "_tracking_setting_widgets", ())
         for widget in widgets:
             widget.setEnabled(editable)
+        of_widgets = getattr(self, "_optical_flow_setting_widgets", ())
+        for widget in of_widgets:
+            widget.setEnabled(editable)
 
     def _sample_display_title(self, sample: Optional[dict[str, Any]] = None) -> str:
         sample = sample or self._current_sample
@@ -986,33 +1269,87 @@ class MainWindow(QMainWindow):
 
     def _tracking_result_group_title(self, sample_id: Optional[str] = None) -> str:
         if sample_id is None:
-            return "Tracking Result: No sample selected"
+            return "Tracking / Motion Index Results: No sample selected"
         sample = self._sample_row_for_id(sample_id) or self._current_sample
         title = self._sample_display_title(sample)
         if title:
             return f"{title}'s Tracking Result"
         return f"{sample_id}'s Tracking Result"
 
-    def _update_preview_crop_button_visibility(self) -> None:
+    def _update_metric_analysis_button_visibility(self) -> None:
         show = (
             self._current_sample_id is not None
-            and self._preview_mode != "cropped_tracking"
+            and not self._metric_analysis_view_active
             and self._base_frame is not None
         )
-        self.btn_preview_crop.setVisible(show)
+        self.btn_metric_analysis.setVisible(show)
+
+    def _clear_metric_preview_state(self) -> None:
+        self._clear_sample_specific_metric_state()
+
+    def _clear_sample_specific_metric_state(self) -> None:
+        self._preview_pause()
+        self._metric_debounce_timer.stop()
+        self._metric_settings_timer.stop()
+        self._cancel_pending_debounced_tracking()
+        self._cropped_preview = None
+        self._preview_frame_index = 0
+        self._clear_of_flow_cache()
+        self.canvas.clear_preview()
+        self.lbl_cropped_frame.setText("—")
+        self.lbl_frame_info.setText("—")
+
+    def _ensure_metric_view_shell_visible(self) -> None:
+        self._center_stack.setCurrentIndex(0)
+        self._metric_analysis_view_active = True
+        self._preview_mode = "cropped_tracking"
+        self.canvas.set_interactive(False)
+        self.btn_metric_analysis.hide()
+        self._set_preview_controls_visible(True)
+        self._set_metric_mode_widgets_visible(True)
+        self._sync_metric_mode_combo()
+        self._set_tracking_settings_editable(True)
+        self._show_cropped_metric_settings_view()
+
+    def _reload_metric_analysis_view_for_current_sample(
+        self,
+        *,
+        resume_playback: bool = False,
+    ) -> bool:
+        self._ensure_metric_view_shell_visible()
+        self.lbl_preview_mode.setText(f"{_METRIC_ANALYSIS_VIEW_LABEL} — loading…")
+        self.update_tracking_result_panel()
+        self._update_optical_flow_qc_readout()
+        return self.enter_metric_analysis_view_for_current_sample(
+            quiet=True,
+            resume_playback=resume_playback,
+        )
 
     def _set_active_sample(self, sample: Optional[dict[str, Any]]) -> None:
         self._cancel_pending_debounced_tracking()
+        prev_sid = self._current_sample_id
         self._current_sample = sample
         sid = str(sample.get("sample_id", "")).strip() if sample else ""
         self._current_sample_id = sid or None
+        if prev_sid and prev_sid != self._current_sample_id:
+            self._of_flow_caches.pop(prev_sid, None)
 
     def _on_tracking_setting_changed(self, *_args: object) -> None:
         if self._current_sample_id:
             self._tracking_result_stale_by_sample[self._current_sample_id] = True
+            self._optical_flow_stale_by_sample[self._current_sample_id] = True
             self.update_tracking_result_panel()
         if self._preview_mode == "cropped_tracking":
-            self._schedule_settings_tracking_refresh()
+            self._schedule_metric_settings_refresh()
+
+    def _on_optical_flow_setting_changed(self, *_args: object) -> None:
+        if self._current_sample_id:
+            self._optical_flow_stale_by_sample[self._current_sample_id] = True
+            self._clear_of_flow_cache(self._current_sample_id)
+            self._update_optical_flow_qc_readout()
+            self.update_tracking_result_panel()
+        if self._preview_mode == "cropped_tracking":
+            self._schedule_metric_settings_refresh()
 
     @staticmethod
     def _status_after_roi_autosave(current_status: str) -> Optional[str]:
@@ -1028,10 +1365,12 @@ class MainWindow(QMainWindow):
         return STATUS_ROI_MARKED
 
     def _cancel_pending_debounced_tracking(self) -> None:
-        self._roi_tracking_debounce_timer.stop()
-        self._tracking_refresh_timer.stop()
+        self._metric_debounce_timer.stop()
+        self._metric_settings_timer.stop()
         self._tracking_run_token += 1
+        self._optical_flow_run_token += 1
         self._pending_tracking_snapshot = None
+        self._pending_optical_flow_snapshot = None
 
     def _capture_tracking_snapshot(self) -> Optional[_TrackingRunSnapshot]:
         if self._current_sample_id is None or self._current_sample is None:
@@ -1076,21 +1415,404 @@ class MainWindow(QMainWindow):
             and current.video_path == snapshot.video_path
         )
 
-    def _schedule_debounced_tracking(self, *, show_scheduled: bool = False) -> None:
-        snapshot = self._capture_tracking_snapshot()
-        if snapshot is None:
+    def _schedule_debounced_metrics(self, *, show_scheduled: bool = False) -> None:
+        track_snap = self._capture_tracking_snapshot()
+        of_snap = self._capture_optical_flow_snapshot()
+        if track_snap is None and of_snap is None:
             return
-        self._pending_tracking_snapshot = snapshot
-        self._roi_tracking_debounce_timer.start()
+        if track_snap is not None:
+            self._pending_tracking_snapshot = track_snap
+        if of_snap is not None:
+            if self._current_sample_id:
+                self._clear_of_flow_cache(self._current_sample_id)
+            self._pending_optical_flow_snapshot = of_snap
+        self._metric_debounce_timer.start()
         if show_scheduled:
-            self._set_roi_save_status("Tracking scheduled…", saved=True)
+            self._set_roi_save_status("Metric calculation scheduled", saved=True)
 
-    def _schedule_settings_tracking_refresh(self) -> None:
-        snapshot = self._capture_tracking_snapshot()
-        if snapshot is None:
+    def _schedule_metric_settings_refresh(self) -> None:
+        if self._preview_mode != "cropped_tracking":
             return
-        self._pending_tracking_snapshot = snapshot
-        self._tracking_refresh_timer.start()
+        track_snap = self._capture_tracking_snapshot()
+        of_snap = self._capture_optical_flow_snapshot()
+        if track_snap is None and of_snap is None:
+            return
+        if track_snap is not None:
+            self._pending_tracking_snapshot = track_snap
+        if of_snap is not None:
+            if self._current_sample_id:
+                self._clear_of_flow_cache(self._current_sample_id)
+            self._pending_optical_flow_snapshot = of_snap
+        self._metric_settings_timer.start()
+
+    def _on_metric_debounce_fired(self) -> None:
+        track_snap = self._pending_tracking_snapshot
+        of_snap = self._pending_optical_flow_snapshot
+        if track_snap is not None:
+            self._run_draft_tracking_for_snapshot(
+                track_snap,
+                update_cropped_preview=self._preview_mode == "cropped_tracking",
+                quiet_skip=True,
+            )
+        if of_snap is not None:
+            self._run_optical_flow_for_snapshot(of_snap, quiet_skip=True)
+
+    def _on_metric_settings_debounce_fired(self) -> None:
+        if self._preview_mode != "cropped_tracking":
+            return
+        self._on_metric_debounce_fired()
+
+    def _optical_flow_settings_from_ui(self) -> OpticalFlowSettings:
+        blur = int(self.combo_of_blur.currentData() or 0)
+        return OpticalFlowSettings(
+            mask_percentile=float(self.spin_of_mask_percentile.value()),
+            gaussian_blur_kernel=blur,
+            pyr_scale=float(self.spin_of_pyr_scale.value()),
+            levels=int(self.spin_of_levels.value()),
+            winsize=int(self.spin_of_winsize.value()),
+            iterations=int(self.spin_of_iterations.value()),
+            poly_n=int(self.spin_of_poly_n.value()),
+            poly_sigma=float(self.spin_of_poly_sigma.value()),
+            microns_per_pixel=float(self.spin_track_mpp.value()),
+            seconds_per_frame=float(self.spin_track_spf.value()),
+        )
+
+    def _capture_optical_flow_snapshot(self) -> Optional[_OpticalFlowRunSnapshot]:
+        if self._current_sample_id is None or self._current_sample is None:
+            return None
+        roi = self.canvas.rect_roi()
+        if roi is None:
+            return None
+        path = self._sample_file_path()
+        if path is None or not path.exists() or not is_supported_video_path(path):
+            return None
+        check = self._validate_current_roi()
+        if not check.ok or check.roi_oriented is None:
+            return None
+        try:
+            settings = self._optical_flow_settings_from_ui()
+        except ValueError:
+            return None
+        return _OpticalFlowRunSnapshot(
+            sample_id=self._current_sample_id,
+            roi_key=(roi.x, roi.y, roi.width, roi.height),
+            settings_key=tuple(sorted(asdict(settings).items())),
+            orientation_key=(
+                float(self._orientation.rotation_angle_degrees),
+                bool(self._orientation.mirror_y_axis),
+                bool(self._orientation.flipped_180),
+            ),
+            video_path=str(path.resolve()),
+            run_token=self._optical_flow_run_token,
+        )
+
+    def _optical_flow_snapshot_matches_current(
+        self, snapshot: _OpticalFlowRunSnapshot
+    ) -> bool:
+        if snapshot.run_token != self._optical_flow_run_token:
+            return False
+        current = self._capture_optical_flow_snapshot()
+        if current is None:
+            return False
+        return (
+            current.sample_id == snapshot.sample_id
+            and current.roi_key == snapshot.roi_key
+            and current.settings_key == snapshot.settings_key
+            and current.orientation_key == snapshot.orientation_key
+            and current.video_path == snapshot.video_path
+        )
+
+    def _draft_optical_flow_json_path(self, data_id: str) -> Path:
+        assert self._project_root is not None
+        from actintrack_app.schema_compat import draft_optical_flow_path
+
+        return draft_optical_flow_path(self._project_root, data_id)
+
+    def _run_optical_flow_for_snapshot(
+            self,
+        snapshot: _OpticalFlowRunSnapshot,
+        *,
+        quiet_skip: bool = True,
+    ) -> bool:
+        if self._optical_flow_job_running:
+            return False
+        if snapshot.sample_id != self._current_sample_id:
+            return False
+        if not self._optical_flow_snapshot_matches_current(snapshot):
+            if not quiet_skip:
+                self._set_roi_save_status("Optical flow skipped: ROI changed", saved=True)
+            return False
+        check = self._validate_current_roi()
+        if not check.ok or check.roi_oriented is None:
+            return False
+        path = Path(snapshot.video_path)
+        if not path.is_file() or not is_supported_video_path(path):
+            return False
+        try:
+            settings = self._optical_flow_settings_from_ui()
+        except ValueError:
+            return False
+
+        roi_bounds = (
+            int(check.roi_oriented.x),
+            int(check.roi_oriented.y),
+            int(check.roi_oriented.width),
+            int(check.roi_oriented.height),
+        )
+        self._optical_flow_job_running = True
+        self._update_optical_flow_qc_readout()
+        QApplication.processEvents()
+        try:
+            frames = load_cropped_frames_from_video(
+                path, self._orientation, check.roi_oriented
+            )
+            fingerprint = build_optical_flow_fingerprint(
+                sample_id=snapshot.sample_id,
+                roi_bounds=roi_bounds,
+                settings=settings,
+                data_identity=str(path.resolve()),
+                frame_count=len(frames),
+            )
+            result = compute_optical_flow_motion_index(
+                frames,
+                settings,
+                sample_id=snapshot.sample_id,
+                data_identity=str(path.resolve()),
+                roi_bounds=roi_bounds,
+                fingerprint=fingerprint,
+            )
+        except Exception:
+            if not quiet_skip:
+                self._set_roi_save_status("Optical flow failed", saved=False)
+            return False
+        finally:
+            self._optical_flow_job_running = False
+
+        if not self._optical_flow_snapshot_matches_current(snapshot):
+            if not quiet_skip:
+                self._set_roi_save_status("Optical flow skipped: settings changed", saved=True)
+            return False
+
+        self._clear_of_flow_cache(snapshot.sample_id)
+        self._commit_optical_flow_result(snapshot.sample_id, result)
+        if self._preview_mode == "cropped_tracking":
+            self._show_cropped_preview_frame(self._preview_frame_index)
+        return True
+
+    def _save_draft_optical_flow_result(
+        self, sample_id: str, result: OpticalFlowResult
+    ) -> None:
+        if self._project_root is None:
+            return
+        path = self._draft_optical_flow_json_path(sample_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(result_to_dict(result), indent=2), encoding="utf-8")
+
+    def _invalidate_optical_flow_for_sample(self, sample_id: str) -> None:
+        self._optical_flow_results_by_sample.pop(sample_id, None)
+        self._optical_flow_stale_by_sample.pop(sample_id, None)
+        self._of_flow_caches.pop(sample_id, None)
+        if self._project_root is not None:
+            draft_path = self._draft_optical_flow_json_path(sample_id)
+            if draft_path.is_file():
+                try:
+                    draft_path.unlink()
+                except OSError:
+                    pass
+
+    def _clear_of_flow_cache(self, sample_id: Optional[str] = None) -> None:
+        if sample_id is None:
+            self._of_flow_caches.clear()
+        else:
+            self._of_flow_caches.pop(sample_id, None)
+
+    def _optical_flow_viz_settings_from_ui(self) -> OpticalFlowVisualizationSettings:
+        return OpticalFlowVisualizationSettings(
+            arrow_spacing_px=int(self.spin_of_arrow_spacing.value()),
+            arrow_scale=float(self.spin_of_arrow_scale.value()),
+        )
+
+    def _current_optical_flow_fingerprint(self) -> str:
+        if self._current_sample_id is None or self._cropped_preview is None:
+            return ""
+        check = self._validate_current_roi()
+        if not check.ok or check.roi_oriented is None:
+            return ""
+        path = self._sample_file_path()
+        data_identity = str(path.resolve()) if path is not None else ""
+        roi_bounds = (
+            int(check.roi_oriented.x),
+            int(check.roi_oriented.y),
+            int(check.roi_oriented.width),
+            int(check.roi_oriented.height),
+        )
+        try:
+            settings = self._optical_flow_settings_from_ui()
+        except ValueError:
+            return ""
+        return build_optical_flow_fingerprint(
+            sample_id=self._current_sample_id,
+            roi_bounds=roi_bounds,
+            settings=settings,
+            data_identity=data_identity,
+            frame_count=len(self._cropped_preview.frames),
+        )
+
+    def _get_optical_flow_result_object(
+        self, sample_id: str
+    ) -> Optional[OpticalFlowResult]:
+        cached = self._optical_flow_results_by_sample.get(sample_id)
+        if cached is not None:
+            return cached
+        if self._project_root is not None:
+            from actintrack_app.schema_compat import resolve_draft_optical_flow_path
+
+            draft_path = resolve_draft_optical_flow_path(self._project_root, sample_id)
+            if draft_path is not None:
+                try:
+                    data = json.loads(draft_path.read_text(encoding="utf-8"))
+                    return result_from_dict(data)
+                except (OSError, json.JSONDecodeError):
+                    pass
+        return None
+
+    def _optical_flow_qc_status_for_sample(self, sample_id: str) -> str:
+        result = self._get_optical_flow_result_object(sample_id)
+        fingerprint = self._current_optical_flow_fingerprint() if sample_id == self._current_sample_id else ""
+        return resolve_qc_status(
+            result=result,
+            is_computing=self._optical_flow_job_running and sample_id == self._current_sample_id,
+            is_stale_flag=bool(self._optical_flow_stale_by_sample.get(sample_id)),
+            current_fingerprint=fingerprint,
+        )
+
+    def _update_optical_flow_qc_readout(self) -> None:
+        if not hasattr(self, "lbl_of_qc"):
+            return
+        sid = self._current_sample_id
+        if sid is None:
+            self.lbl_of_qc.setText("QC: —")
+            return
+        result = self._get_optical_flow_result_object(sid)
+        status = self._optical_flow_qc_status_for_sample(sid)
+        qc = format_optical_flow_qc(result)
+        lines = [
+            f"Status: {status}",
+            f"General Movement: {qc['general_movement']} µm/s",
+            f"Downward Motion: {qc['downward_motion']} µm/s",
+            f"Net Y Velocity: {qc['net_y_velocity']} µm/s",
+            f"Directionality Ratio: {qc['directionality_ratio']}",
+            f"Valid Pixel Fraction: {qc['valid_pixel_fraction']}",
+            f"Saturated Pixel Fraction: {qc['saturated_pixel_fraction']}",
+            f"Frame pairs used: {qc['frame_pairs_used']}",
+        ]
+        self.lbl_of_qc.setText("\n".join(lines))
+
+    def _ensure_of_flow_cache(self) -> Optional[OpticalFlowFlowCache]:
+        if self._current_sample_id is None or self._cropped_preview is None:
+            return None
+        fingerprint = self._current_optical_flow_fingerprint()
+        if not fingerprint:
+            return None
+        sid = self._current_sample_id
+        existing = self._of_flow_caches.get(sid)
+        if existing is not None and existing.fingerprint == fingerprint:
+            return existing
+        try:
+            settings = self._optical_flow_settings_from_ui()
+        except ValueError:
+            return None
+        cache = build_flow_cache(
+            self._cropped_preview.frames,
+            settings,
+            sample_id=sid,
+            fingerprint=fingerprint,
+        )
+        self._of_flow_caches[sid] = cache
+        return cache
+
+    def _get_overlay_arrows_for_frame(self, frame_index: int) -> list:
+        cache = self._ensure_of_flow_cache()
+        if cache is None or self._cropped_preview is None:
+            return []
+        return get_flow_arrows_for_frame(
+            cache,
+            frame_index,
+            len(self._cropped_preview.frames),
+            self._optical_flow_viz_settings_from_ui(),
+        )
+
+    def _on_show_of_overlay_changed(self, _checked: bool) -> None:
+        if self._preview_mode == "cropped_tracking":
+            self._show_cropped_preview_frame(self._preview_frame_index)
+
+    def _on_of_viz_setting_changed(self, *_args: object) -> None:
+        if self._preview_mode == "cropped_tracking":
+            self._show_cropped_preview_frame(self._preview_frame_index)
+
+    def _commit_optical_flow_result(
+        self, sample_id: str, result: OpticalFlowResult
+    ) -> None:
+        if sample_id != self._current_sample_id:
+            return
+        self._optical_flow_results_by_sample[sample_id] = result
+        self._optical_flow_stale_by_sample.pop(sample_id, None)
+        self._clear_of_flow_cache(sample_id)
+        self._save_draft_optical_flow_result(sample_id, result)
+        self._update_optical_flow_qc_readout()
+        self.update_tracking_result_panel(sample_id)
+        self._refresh_analysis_if_visible()
+
+    @staticmethod
+    def _view_from_optical_flow_dict(data: dict[str, Any]) -> OpticalFlowResultView:
+        if not data.get("has_valid_result"):
+            reason = str(data.get("failure_reason", "")).strip()
+            return OpticalFlowResultView(status="failed", failure_reason=reason)
+        return OpticalFlowResultView(
+            status="success",
+            general_movement=_optional_gui_float(data.get("optical_flow_general_movement_um_s")),
+            downward_motion=_optional_gui_float(data.get("optical_flow_downward_motion_um_s")),
+            net_y_velocity=_optional_gui_float(data.get("optical_flow_net_y_velocity_um_s")),
+            directionality_ratio=_optional_gui_float(data.get("optical_flow_directionality_ratio")),
+            valid_pixel_fraction=_optional_gui_float(data.get("optical_flow_valid_pixel_fraction")),
+            saturated_pixel_fraction=_optional_gui_float(
+                data.get("optical_flow_saturated_pixel_fraction")
+            ),
+        )
+
+    def _view_from_optical_flow_result(self, result: OpticalFlowResult) -> OpticalFlowResultView:
+        if not result.has_valid_result:
+            return OpticalFlowResultView(
+                status="failed",
+                failure_reason=result.failure_reason,
+            )
+        return OpticalFlowResultView(
+            status="success",
+            general_movement=result.optical_flow_general_movement_um_s,
+            downward_motion=result.optical_flow_downward_motion_um_s,
+            net_y_velocity=result.optical_flow_net_y_velocity_um_s,
+            directionality_ratio=result.optical_flow_directionality_ratio,
+            valid_pixel_fraction=result.optical_flow_valid_pixel_fraction,
+            saturated_pixel_fraction=result.optical_flow_saturated_pixel_fraction,
+        )
+
+    def load_latest_optical_flow_result_for_sample(
+        self, sample_id: str
+    ) -> Optional[OpticalFlowResultView]:
+        if self._project_root is not None:
+            from actintrack_app.schema_compat import resolve_draft_optical_flow_path
+
+            draft_path = resolve_draft_optical_flow_path(self._project_root, sample_id)
+            if draft_path is not None:
+                try:
+                    data = json.loads(draft_path.read_text(encoding="utf-8"))
+                    return self._view_from_optical_flow_dict(data)
+                except (OSError, json.JSONDecodeError):
+                    pass
+        cached = self._optical_flow_results_by_sample.get(sample_id)
+        if cached is not None:
+            return self._view_from_optical_flow_result(cached)
+        return None
 
     def _run_draft_tracking_for_snapshot(
         self,
@@ -1124,7 +1846,6 @@ class MainWindow(QMainWindow):
             return False
 
         self._tracking_job_running = True
-        self._set_roi_save_status("Tracking…", saved=True)
         QApplication.processEvents()
         try:
             frames = load_cropped_frames_from_video(
@@ -1152,31 +1873,7 @@ class MainWindow(QMainWindow):
             self.slider_cropped_frame.setMaximum(max_index)
             frame_idx = min(self._preview_frame_index, max_index)
             self._show_cropped_preview_frame(frame_idx)
-        self._set_roi_save_status("Tracking updated", saved=True)
-        self._status("Tracking updated")
         return True
-
-    def _on_roi_tracking_debounce_fired(self) -> None:
-        snapshot = self._pending_tracking_snapshot
-        if snapshot is None:
-            return
-        self._run_draft_tracking_for_snapshot(
-            snapshot,
-            update_cropped_preview=self._preview_mode == "cropped_tracking",
-            quiet_skip=True,
-        )
-
-    def _on_settings_tracking_debounce_fired(self) -> None:
-        snapshot = self._pending_tracking_snapshot
-        if snapshot is None:
-            return
-        if self._preview_mode != "cropped_tracking":
-            return
-        self._run_draft_tracking_for_snapshot(
-            snapshot,
-            update_cropped_preview=True,
-            quiet_skip=True,
-        )
 
     def _update_sample_list_row_for_id(self, sample_id: str) -> None:
         for i in range(self.list_samples.count()):
@@ -1319,25 +2016,79 @@ class MainWindow(QMainWindow):
                 )
         return None
 
-    def _render_tracking_result_panel(self, view: Optional[SampleTrackingResultView]) -> None:
-        if view is None or view.status == "none":
-            self.lbl_tracking_result.setText("Not generated yet")
-            return
-        if view.status == "failed":
-            text = "Failed"
-            if view.failure_reason:
-                text += f"\n{view.failure_reason}"
-            self.lbl_tracking_result.setText(text)
-            return
-        tracks_line = f"Tracks Used: {view.tracks_used}"
-        if view.tracks_requested > view.tracks_used:
-            tracks_line = f"Tracks Used: {view.tracks_used} / {view.tracks_requested}"
-        self.lbl_tracking_result.setText(
-            f"Downward Velocity: {view.downward_velocity:.4f} µm/sec\n"
-            f"General Movement: {view.general_movement:.4f} µm/sec\n"
-            f"{tracks_line}\n"
-            f"Valid Steps: {view.valid_steps}"
-        )
+    def _render_tracking_result_panel(
+        self,
+        template_view: Optional[SampleTrackingResultView],
+        optical_flow_view: Optional[OpticalFlowResultView],
+        *,
+        template_stale: bool = False,
+        optical_flow_stale: bool = False,
+    ) -> None:
+        lines: list[str] = []
+
+        lines.append("Template Tracking Motion Index")
+        if template_stale:
+            lines.append("May not match current settings.")
+        elif template_view is None or template_view.status == "none":
+            lines.append("Not generated yet")
+        elif template_view.status == "failed":
+            lines.append("Failed")
+            if template_view.failure_reason:
+                lines.append(template_view.failure_reason)
+        else:
+            tracks_line = f"Tracks Used: {template_view.tracks_used}"
+            if template_view.tracks_requested > template_view.tracks_used:
+                tracks_line = (
+                    f"Tracks Used: {template_view.tracks_used} / "
+                    f"{template_view.tracks_requested}"
+                )
+            lines.extend(
+                [
+                    f"Downward Velocity: {template_view.downward_velocity:.4f} µm/s",
+                    f"General Movement: {template_view.general_movement:.4f} µm/s",
+                    tracks_line,
+                    f"Valid Steps: {template_view.valid_steps}",
+                ]
+            )
+
+        lines.append("")
+        lines.append("Optical Flow Motion Index (Draft)")
+        sid = self._current_sample_id
+        of_status = self._optical_flow_qc_status_for_sample(sid) if sid else "Not computed"
+        lines.append(f"Status: {of_status}")
+        if optical_flow_stale:
+            lines.append("May not match current settings.")
+        elif optical_flow_view is None or optical_flow_view.status == "none":
+            if of_status == "Not computed":
+                lines.append("Not generated yet")
+        elif optical_flow_view.status == "failed":
+            lines.append("Failed")
+            if optical_flow_view.failure_reason:
+                lines.append(optical_flow_view.failure_reason)
+        else:
+            result_obj = self._get_optical_flow_result_object(sid) if sid else None
+            frame_pairs = (
+                str(result_obj.frame_pair_count)
+                if result_obj is not None and result_obj.frame_pair_count
+                else "—"
+            )
+            lines.extend(
+                [
+                    f"Frame pairs used: {frame_pairs}",
+                    f"General Movement: {_fmt_optional_float(optical_flow_view.general_movement)} µm/s",
+                    f"Downward Motion: {_fmt_optional_float(optical_flow_view.downward_motion)} µm/s",
+                    f"Net Y Velocity: {_fmt_optional_float(optical_flow_view.net_y_velocity)} µm/s",
+                    f"Directionality Ratio: {_fmt_optional_float(optical_flow_view.directionality_ratio)}",
+                    f"Valid Pixel Fraction: {_fmt_optional_float(optical_flow_view.valid_pixel_fraction)}",
+                ]
+            )
+            if optical_flow_view.saturated_pixel_fraction is not None:
+                lines.append(
+                    "Saturated Pixel Fraction: "
+                    f"{_fmt_optional_float(optical_flow_view.saturated_pixel_fraction)}"
+                )
+
+        self.lbl_tracking_result.setText("\n".join(lines))
 
     def update_tracking_result_panel(self, sample_id: Optional[str] = None) -> None:
         sid = sample_id or self._current_sample_id
@@ -1348,18 +2099,15 @@ class MainWindow(QMainWindow):
         if sid != self._current_sample_id:
             return
         self.grp_tracking_result.setTitle(self._tracking_result_group_title(sid))
-        if self._tracking_result_stale_by_sample.get(sid):
-            self.lbl_tracking_result.setText(
-                "Existing result may not match current settings.\n"
-                "Re-run Preview Cropped ROI to update."
-            )
-            return
         self._render_tracking_result_panel(
-            self.load_latest_tracking_result_for_sample(sid)
+            self.load_latest_tracking_result_for_sample(sid),
+            self.load_latest_optical_flow_result_for_sample(sid),
+            template_stale=bool(self._tracking_result_stale_by_sample.get(sid)),
+            optical_flow_stale=bool(self._optical_flow_stale_by_sample.get(sid)),
         )
 
     def _save_draft_tracking_result(
-        self,
+                self,
         sample_id: str,
         analysis: CroppedPreviewAnalysis,
         params: MotionIndexParams,
@@ -1392,6 +2140,7 @@ class MainWindow(QMainWindow):
                     draft_path.unlink()
                 except OSError:
                     pass
+        self._invalidate_optical_flow_for_sample(sample_id)
 
     def _commit_tracking_result(
         self,
@@ -1408,11 +2157,6 @@ class MainWindow(QMainWindow):
         self._refresh_analysis_if_visible()
 
     def _update_orientation_label(self) -> None:
-        self.lbl_orientation.setText(
-            f"Angle: {self._orientation.rotation_angle_degrees:.1f}°  "
-            f"Mirror Y: {'yes' if self._orientation.mirror_y_axis else 'no'}  "
-            f"Flip 180°: {'yes' if self._orientation.flipped_180 else 'no'}"
-        )
         self.chk_mirror_y.blockSignals(True)
         self.chk_mirror_y.setChecked(self._orientation.mirror_y_axis)
         self.chk_mirror_y.blockSignals(False)
@@ -1490,19 +2234,8 @@ class MainWindow(QMainWindow):
         self._roi_user_adjusted = False
         self._roi_autosave_pending = False
         self._set_roi_save_status("ROI autosaved", saved=True)
-        self._schedule_debounced_tracking(show_scheduled=True)
+        self._schedule_debounced_metrics(show_scheduled=True)
         return True
-
-    def _rotate_by(self, delta: float) -> None:
-        self._exit_cropped_preview_mode()
-        angle = self._orientation.rotation_angle_degrees + delta
-        while angle > 180:
-            angle -= 360
-        while angle < -180:
-            angle += 360
-        self._orientation.rotation_angle_degrees = angle
-        self._orientation.manual_rotation_steps = []
-        self._refresh_display()
 
     def _on_apply_custom_angle(self) -> None:
         self._exit_cropped_preview_mode()
@@ -1529,28 +2262,13 @@ class MainWindow(QMainWindow):
 
     def on_roi_changed(self, roi: Optional[RectROI]) -> None:
         if roi is None:
-            self.lbl_roi_info.setText("No ROI selected.")
             return
         self._roi_user_adjusted = True
         self._roi_autosave_pending = True
         self._set_roi_save_status("Unsaved changes", saved=False)
         if str(self._loaded_annotation_source) == "auto_suggested":
             self._loaded_annotation_source = "auto_suggested_adjusted"
-        if self._base_frame is not None:
-            check = validate_roi_for_sample(
-                roi, base_frame=self._base_frame, orientation=self._orientation
-            )
-            if check.roi_original is not None:
-                self.lbl_roi_info.setText(
-                    f"ROI (oriented): x={roi.x} y={roi.y} w={roi.width} h={roi.height}\n"
-                    f"Original frame: x={check.roi_original.x} y={check.roi_original.y} "
-                    f"w={check.roi_original.width} h={check.roi_original.height}"
-                )
-                return
-        self.lbl_roi_info.setText(
-            f"ROI x={roi.x} y={roi.y} w={roi.width} h={roi.height}"
-        )
-        self._schedule_debounced_tracking(show_scheduled=False)
+        self._schedule_debounced_metrics(show_scheduled=False)
 
     def on_roi_edit_finished(self) -> None:
         self._autosave_roi(quiet=True)
@@ -1559,7 +2277,6 @@ class MainWindow(QMainWindow):
         self._cancel_pending_debounced_tracking()
         self._exit_cropped_preview_mode()
         self.canvas.set_rect_roi(None)
-        self.lbl_roi_info.setText("ROI cleared.")
         self._roi_user_adjusted = True
         self._roi_autosave_pending = False
         self._set_roi_save_status("ROI cleared", saved=False)
@@ -1588,58 +2305,83 @@ class MainWindow(QMainWindow):
             downward_direction="increasing_y",
         )
 
-    def _on_preview_crop(self) -> None:
+    def _on_show_metric_analysis_view(self) -> None:
+        self.enter_metric_analysis_view_for_current_sample(quiet=False)
+
+    def enter_metric_analysis_view_for_current_sample(
+        self,
+        *,
+        quiet: bool = False,
+        resume_playback: bool = False,
+    ) -> bool:
         if self._project_root is None or self._current_sample is None:
-            QMessageBox.warning(self, "Preview Cropped ROI", "Select a data file first.")
-            return
+            if not quiet:
+                QMessageBox.warning(
+                    self, _METRIC_ANALYSIS_VIEW_LABEL, "Select a data file first."
+                )
+            return False
 
         self._cancel_pending_debounced_tracking()
         self._autosave_roi(quiet=True)
         check = self._validate_current_roi()
         if not check.ok or check.roi_oriented is None:
-            QMessageBox.warning(
-                self,
-                "Preview Cropped ROI",
-                check.message or "Please draw or load a rectangular ROI first.",
+            message = check.message or (
+                "Metric Analysis View is unavailable because this Sample "
+                "does not have a saved ROI."
             )
-            return
+            if quiet:
+                self._show_metric_analysis_placeholder(message)
+            else:
+                QMessageBox.warning(self, _METRIC_ANALYSIS_VIEW_LABEL, message)
+            return False
+
         path = self._sample_file_path()
         if path is None or not path.exists():
-            QMessageBox.warning(
-                self,
-                "Preview Cropped ROI",
-                "Import data into this sample before previewing the cropped ROI.",
+            message = (
+                "Metric Analysis View is unavailable because this Sample "
+                "does not have valid Data."
             )
-            return
+            if quiet:
+                self._show_metric_analysis_placeholder(message)
+            else:
+                QMessageBox.warning(self, _METRIC_ANALYSIS_VIEW_LABEL, message)
+            return False
         if not is_supported_video_path(path):
-            QMessageBox.information(
-                self,
-                "Unsupported",
-                "Only AVI and MP4 data files are supported in the current 2D workflow. "
-                "Image sequences and 3D/raw microscopy files will be added later.",
+            message = (
+                "Only AVI and MP4 data files are supported in the current 2D workflow."
             )
-            return
+            if quiet:
+                self._show_metric_analysis_placeholder(message)
+            else:
+                QMessageBox.information(self, "Unsupported", message)
+            return False
 
         try:
             params = self._tracking_params_from_ui()
         except ValueError as exc:
-            QMessageBox.warning(self, "Tracking Settings", str(exc))
-            return
+            if quiet:
+                self._show_metric_analysis_placeholder(str(exc))
+            else:
+                QMessageBox.warning(self, "Tracking Settings", str(exc))
+            return False
 
         crop_w = int(check.roi_oriented.width)
         crop_h = int(check.roi_oriented.height)
         min_dim = params.template_patch_size_px + (2 * params.search_radius_px) + 2
         if min(crop_w, crop_h) < min_dim:
-            QMessageBox.warning(
-                self,
-                "Preview Cropped ROI",
+            message = (
                 f"The ROI ({crop_w}×{crop_h} px) is too small for patch size "
                 f"{params.template_patch_size_px} and search radius "
-                f"{params.search_radius_px}.",
+                f"{params.search_radius_px}."
             )
-            return
+            if quiet:
+                self._show_metric_analysis_placeholder(message)
+            else:
+                QMessageBox.warning(self, _METRIC_ANALYSIS_VIEW_LABEL, message)
+            return False
 
-        self._status("Building cropped ROI preview and running draft tracking…")
+        if not quiet:
+            self._status("Building metric analysis preview…")
         QApplication.processEvents()
         try:
             frames = load_cropped_frames_from_video(
@@ -1649,31 +2391,87 @@ class MainWindow(QMainWindow):
             )
             analysis = analyze_cropped_preview(frames, params=params)
         except Exception as exc:
-            QMessageBox.warning(self, "Preview Cropped ROI", str(exc))
-            return
+            if quiet:
+                self._show_metric_analysis_placeholder(str(exc))
+            else:
+                QMessageBox.warning(self, _METRIC_ANALYSIS_VIEW_LABEL, str(exc))
+            return False
 
         self._enter_cropped_preview_mode(analysis, params=params)
+        if self._current_sample_id:
+            of_settings = self._optical_flow_settings_from_ui()
+            roi_bounds = (
+                int(check.roi_oriented.x),
+                int(check.roi_oriented.y),
+                int(check.roi_oriented.width),
+                int(check.roi_oriented.height),
+            )
+            fingerprint = build_optical_flow_fingerprint(
+                sample_id=self._current_sample_id,
+                roi_bounds=roi_bounds,
+                settings=of_settings,
+                data_identity=str(path.resolve()),
+                frame_count=len(frames),
+            )
+            of_result = compute_optical_flow_motion_index(
+                frames,
+                of_settings,
+                sample_id=self._current_sample_id,
+                data_identity=str(path.resolve()),
+                roi_bounds=roi_bounds,
+                fingerprint=fingerprint,
+            )
+            self._commit_optical_flow_result(self._current_sample_id, of_result)
+        if resume_playback:
+            self._preview_play()
+        return True
+
+    def _show_metric_analysis_placeholder(self, message: str) -> None:
+        self._metric_analysis_view_active = True
+        self._preview_pause()
+        self._cropped_preview = None
+        self._preview_frame_index = 0
+        self._center_stack.setCurrentIndex(0)
+        self._preview_mode = "cropped_tracking"
+        self.canvas.set_interactive(False)
+        self.canvas.clear_preview()
+        self.btn_metric_analysis.hide()
+        self._set_preview_controls_visible(False)
+        self._set_metric_mode_widgets_visible(True)
+        self._sync_metric_mode_combo()
+        self._set_tracking_settings_editable(True)
+        self._show_cropped_metric_settings_view()
+        self._update_optical_flow_qc_readout()
+        self.update_tracking_result_panel()
+        self.lbl_preview_mode.setText(f"{_METRIC_ANALYSIS_VIEW_LABEL} — {message}")
+        self.lbl_cropped_frame.setText("—")
+        self.lbl_frame_info.setText("—")
+        self._update_metric_analysis_button_visibility()
 
     def _set_preview_controls_visible(self, visible: bool) -> None:
         for widget in self._preview_control_widgets:
             widget.setVisible(visible)
 
     def _enter_cropped_preview_mode(
-        self,
+            self,
         analysis: CroppedPreviewAnalysis,
         *,
         params: Optional[MotionIndexParams] = None,
     ) -> None:
         self._preview_pause()
         self._center_stack.setCurrentIndex(0)
+        self._metric_analysis_view_active = True
         self._preview_mode = "cropped_tracking"
         self._cropped_preview = analysis
         self._preview_frame_index = 0
         self.canvas.set_interactive(False)
-        self.btn_preview_crop.hide()
+        self.btn_metric_analysis.hide()
         self._set_preview_controls_visible(True)
+        self._set_metric_mode_widgets_visible(True)
+        self._sync_metric_mode_combo()
         self._set_tracking_settings_editable(True)
-        self._show_tracking_settings_view()
+        self._show_cropped_metric_settings_view()
+        self._update_optical_flow_qc_readout()
         if self._current_sample_id:
             commit_params = params or analysis.params
             if commit_params is None:
@@ -1684,7 +2482,7 @@ class MainWindow(QMainWindow):
             self._commit_tracking_result(
                 self._current_sample_id, analysis, commit_params
             )
-        self.lbl_preview_mode.setText("Cropped ROI preview")
+        self.lbl_preview_mode.setText(_METRIC_ANALYSIS_VIEW_LABEL)
         count = max(1, len(analysis.frames))
         max_index = max(0, count - 1)
         self.slider_frame.setMaximum(max_index)
@@ -1693,20 +2491,22 @@ class MainWindow(QMainWindow):
         self._show_cropped_preview_frame(0)
         if analysis.tracking_warning:
             self._status(
-                f"Cropped ROI preview ready. {analysis.tracking_warning}"
+                f"{_METRIC_ANALYSIS_VIEW_LABEL} ready. {analysis.tracking_warning}"
             )
         else:
-            self._status("Cropped ROI preview ready. Press Play to loop.")
+            self._status(f"{_METRIC_ANALYSIS_VIEW_LABEL} ready. Press Play to loop.")
+        self._update_metric_analysis_button_visibility()
 
     def _exit_cropped_preview_mode(self) -> None:
-        if self._preview_mode != "cropped_tracking":
+        if not self._metric_analysis_view_active:
             self._set_tracking_settings_editable(False)
             self._show_roi_controls_view()
             return
+        self._metric_analysis_view_active = False
         self._set_tracking_settings_editable(False)
         self.reset_preview_state(clear_image=False, reset_roi_controls=True)
         self.lbl_preview_mode.setText(self._FULL_PREVIEW_HINT)
-        self._update_preview_crop_button_visibility()
+        self._update_metric_analysis_button_visibility()
         if self._base_frame is not None:
             self.slider_frame.setMaximum(max(0, self._total_frames - 1))
             self.spin_frame.setMaximum(max(0, self._total_frames - 1))
@@ -1770,7 +2570,17 @@ class MainWindow(QMainWindow):
             return
         count = len(self._cropped_preview.frames)
         index = max(0, min(index, count - 1))
-        frame = render_cropped_tracking_frame(self._cropped_preview, index)
+        if self._cropped_metric_mode == "optical_flow":
+            frame = self._cropped_preview.frames[index].copy()
+            if (
+                hasattr(self, "chk_show_of_overlay")
+                and self.chk_show_of_overlay.isChecked()
+            ):
+                arrows = self._get_overlay_arrows_for_frame(index)
+                if arrows:
+                    frame = render_optical_flow_overlay(frame, arrows)
+        else:
+            frame = render_cropped_tracking_frame(self._cropped_preview, index)
         self._preview_frame_index = index
         self.canvas.set_preview_frame(frame)
         self.slider_frame.blockSignals(True)
@@ -1798,9 +2608,6 @@ class MainWindow(QMainWindow):
             self.canvas.set_rect_roi(tracking_crop_to_rect(crop))
             self._loaded_annotation_source = "auto_suggested"
             self._roi_user_adjusted = False
-            self.lbl_roi_info.setText(
-                f"Suggested ROI (confidence {crop.confidence:.2f}) — review and adjust."
-            )
             self._autosave_roi(quiet=True)
         except ValueError as e:
             QMessageBox.warning(self, "ROI Suggestion", str(e))
@@ -1939,9 +2746,9 @@ class MainWindow(QMainWindow):
             return True
         reply = QMessageBox.warning(
             self,
-            "ROI Not Approved",
+            "ROI Pending Review",
             "This ROI is marked pending review (e.g. propagated annotation). "
-            "Export anyway without approving?",
+            "Export anyway?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         return reply == QMessageBox.StandardButton.Yes
@@ -2132,57 +2939,8 @@ class MainWindow(QMainWindow):
             f"Propagated to {len(to_write)} sample(s). "
             f"{skipped} skipped (existing annotations). "
             f"{protected_skipped} skipped (approved/processed). "
-            "Review each with Approve / Adjust / Reject.",
+            "Review and adjust each propagated ROI as needed.",
         )
-
-    def _on_approve_roi(self) -> None:
-        self._set_review_status(STATUS_ROI_APPROVED, requires_review=False)
-
-    def _on_reject_roi(self) -> None:
-        if self._project_root is None or self._current_sample is None:
-            return
-        sid = str(self._current_sample["sample_id"])
-        crop_path = self._project_root / METADATA_DIR / CROP_METADATA_JSON
-        data = load_crop_metadata(crop_path)
-        data.get("samples", {}).pop(sid, None)
-        with crop_path.open("w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-        update_samples_csv(
-            self._project_root / METADATA_DIR / SAMPLES_CSV,
-            {"sample_id": sid, "processing_status": STATUS_IMPORTED},
-        )
-        self.canvas.set_rect_roi(None)
-        self._refresh_sample_list()
-        self._status(f"Rejected ROI for {sid}")
-
-    def _set_review_status(self, status: str, *, requires_review: bool) -> None:
-        if self._project_root is None or self._current_sample is None:
-            return
-        sid = str(self._current_sample["sample_id"])
-        ann = get_sample_annotation(self._project_root, sid)
-        if not ann:
-            QMessageBox.warning(self, "Review", "No saved annotation for this sample.")
-            return
-        ann["status"] = status
-        ann["requires_review"] = requires_review
-        ann["review_status"] = "approved" if status == STATUS_ROI_APPROVED else ann.get(
-            "review_status", "pending"
-        )
-        save_sample_crop_annotation(
-            self._project_root / METADATA_DIR / CROP_METADATA_JSON, sid, ann
-        )
-        csv_update: dict[str, str] = {
-            "sample_id": sid,
-            "processing_status": status,
-        }
-        if status == STATUS_ROI_APPROVED:
-            csv_update["review_status"] = "approved"
-        update_samples_csv(
-            self._project_root / METADATA_DIR / SAMPLES_CSV,
-            csv_update,
-        )
-        self._refresh_sample_list()
-        self._status(f"{sid} → {status}")
 
     def _on_process_approved_batch(self) -> None:
         if self._project_root is None or self._current_sample is None:
@@ -2205,18 +2963,18 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "Sample Export",
-                f"No ROI-approved data ready in {group} / {sample_label}.\n"
-                f"Skipped (not approved or missing ROI): {pre_skipped}",
+                f"No ROI-marked data ready in {group} / {sample_label}.\n"
+                f"Skipped (not marked or missing ROI): {pre_skipped}",
             )
             return
         reply = QMessageBox.question(
             self,
-            "Process Approved Data in Sample",
+            "Process Marked ROIs in Sample",
             f"Breed: {group}\n"
             f"Sample: {sample_label}\n\n"
             f"Samples to export: {len(approved)}\n"
             f"Samples skipped: {pre_skipped}\n\n"
-            "Only approved ROIs will be exported. Continue?",
+            "Only ROI-marked samples will be exported. Continue?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes:
@@ -2344,6 +3102,7 @@ class MainWindow(QMainWindow):
 
     def _on_filter_group_changed(self) -> None:
         self._set_last_import_breed(self.combo_filter_group.currentText())
+        self._metric_analysis_view_active = False
         self._set_active_sample(None)
         self.reset_preview_state(
             clear_image=True,
@@ -2353,7 +3112,7 @@ class MainWindow(QMainWindow):
         self.update_tracking_result_panel()
 
     def _after_import_refresh(
-        self,
+            self,
         *,
         group: str | None = None,
         batch_name: str | None = None,
@@ -2715,7 +3474,7 @@ class MainWindow(QMainWindow):
                 self._clear_preview_pane()
 
     def _on_refresh_samples(self) -> None:
-        self._refresh_sample_list()
+            self._refresh_sample_list()
 
     def _on_remove_missing_samples(self) -> None:
         if self._project_root is None:
@@ -2738,7 +3497,6 @@ class MainWindow(QMainWindow):
         self.lbl_selected_file.setText("No data selected.")
         self.lbl_auto_export_name.setText("Auto name: —")
         self.edit_export_name.clear()
-        self.lbl_roi_info.setText("Select data in the sample list.")
         self.reset_preview_state(
             clear_image=True,
             placeholder=self._SELECT_SAMPLE_HINT,
@@ -2750,6 +3508,7 @@ class MainWindow(QMainWindow):
         _previous: Optional[QListWidgetItem],
     ) -> None:
         if current is None:
+            self._metric_analysis_view_active = False
             self._set_active_sample(None)
             self.reset_preview_state(
                 clear_image=True,
@@ -2760,6 +3519,10 @@ class MainWindow(QMainWindow):
         data = self._list_item_meta(current)
         if not data or data.get("item_type") != "sample":
             return
+
+        was_metric_analysis_view = self._metric_analysis_view_active
+        resume_playback = self._preview_playing if was_metric_analysis_view else False
+
         self._set_active_sample(data)
         group = str(data.get("group", ""))
         if group and group in GROUPS and self.combo_filter_group.currentText() != group:
@@ -2770,56 +3533,94 @@ class MainWindow(QMainWindow):
             self.combo_filter_group.blockSignals(False)
         if data.get("processing_status") == "missing_file":
             return
-        self.reset_preview_state(clear_image=True)
+
         sid = str(data.get("sample_id", ""))
-        self.update_tracking_result_panel(sid)
-        self._load_sample_preview()
+        self._preview_page.setUpdatesEnabled(False)
+        try:
+            if was_metric_analysis_view:
+                self._clear_sample_specific_metric_state()
+                self._ensure_metric_view_shell_visible()
+                self.lbl_preview_mode.setText(f"{_METRIC_ANALYSIS_VIEW_LABEL} — loading…")
+                if not self._load_sample_data_context(render_full_preview=False):
+                    self._show_metric_analysis_placeholder(
+                        "Metric Analysis View is unavailable because this Sample "
+                        "does not have valid Data."
+                    )
+                else:
+                    self.update_tracking_result_panel(sid)
+                    if not self._reload_metric_analysis_view_for_current_sample(
+                        resume_playback=resume_playback,
+                    ):
+                        self._schedule_debounced_metrics(show_scheduled=False)
+            else:
+                self.reset_preview_state(clear_image=True)
+                self.update_tracking_result_panel(sid)
+                self._load_full_roi_preview_for_current_sample()
+        finally:
+            self._preview_page.setUpdatesEnabled(True)
+            self._preview_page.update()
 
     def _sample_file_path(self) -> Optional[Path]:
         if self._project_root is None or self._current_sample is None:
             return None
         return self._project_root / str(self._current_sample["stored_path"])
 
-    def _restore_annotation(self, ann: dict[str, Any]) -> None:
+    def _restore_annotation(
+        self, ann: dict[str, Any], *, render_canvas: bool = True
+    ) -> None:
+        self._apply_annotation_from_dict(ann, render_canvas=render_canvas)
+
+    def _apply_annotation_from_dict(
+        self, ann: dict[str, Any], *, render_canvas: bool = True
+    ) -> None:
         self._orientation, roi = annotation_from_legacy(ann)
         self._reference_frame_index = int(ann.get("reference_frame_index", 0))
         self.txt_notes.setPlainText(str(ann.get("notes", "")))
-        self._refresh_display(keep_roi=False)
-        if roi is not None:
+        if render_canvas:
+            self._refresh_display(keep_roi=False)
+            if roi is not None:
+                oriented = self._oriented_frame()
+                if oriented is not None:
+                    self.canvas.set_rect_roi(
+                        roi.clamp(oriented.shape[1], oriented.shape[0])
+                    )
+        elif roi is not None:
             oriented = self._oriented_frame()
             if oriented is not None:
-                self.canvas.set_rect_roi(roi.clamp(oriented.shape[1], oriented.shape[0]))
+                self.canvas.set_rect_roi(
+                    roi.clamp(oriented.shape[1], oriented.shape[0])
+                )
+            else:
+                self.canvas.set_rect_roi(roi)
+        else:
+            self.canvas.set_rect_roi(None)
         self._loaded_annotation_source = str(ann.get("annotation_source", "manual"))
         self._roi_user_adjusted = False
-        src = self._loaded_annotation_source
-        self.lbl_roi_info.setText(f"Loaded annotation ({src}).")
         self._update_orientation_label()
         if self.canvas.rect_roi() is not None:
             self._set_roi_save_status("ROI autosaved", saved=True)
+            if render_canvas:
+                self._schedule_debounced_metrics(show_scheduled=False)
         else:
             self._set_roi_save_status("No ROI saved yet", saved=False)
 
-    def _load_sample_preview(self) -> None:
-        path = self._sample_file_path()
-        if path is None or not path.exists():
-            QMessageBox.warning(self, "Load", "File not found.")
+    def _apply_auto_suggested_roi(self, *, render_canvas: bool) -> None:
+        oriented = self._oriented_frame()
+        if oriented is None:
             return
-        if self._project_root is None or self._current_sample is None:
-            return
-        sid = str(self._current_sample["sample_id"])
-        ann = get_sample_annotation(self._project_root, sid)
-        ref_idx = int(ann.get("reference_frame_index", 0)) if ann else 0
         try:
-            frame, idx, total = load_media_frame(path, ref_idx)
-        except MediaLoadError as e:
-            QMessageBox.critical(self, "Load", str(e))
-            return
-        self._base_frame = frame
-        self._frame_index = idx
-        self._reference_frame_index = idx
-        self._total_frames = total
-        self._orientation = OrientationState()
+            crop = detect_tracking_crop(oriented)
+            if crop.confidence >= AUTO_APPLY_ROI_CONFIDENCE:
+                self.canvas.set_rect_roi(tracking_crop_to_rect(crop))
+                self._loaded_annotation_source = "auto_suggested"
+                self._roi_user_adjusted = False
+        except ValueError:
+            pass
 
+    def _update_current_sample_panel_fields(
+        self, sid: str, frame: np.ndarray, idx: int, total: int
+    ) -> None:
+        assert self._current_sample is not None
         self.slider_frame.setMaximum(max(0, total - 1))
         self.spin_frame.setMaximum(max(0, total - 1))
         self.slider_frame.setValue(idx)
@@ -2837,25 +3638,51 @@ class MainWindow(QMainWindow):
         self.edit_export_name.setText(custom or final_name or auto_name)
         self.edit_export_name.blockSignals(False)
 
-        if ann:
-            self._restore_annotation(ann)
-        else:
-            self._refresh_display(keep_roi=False)
-            oriented = self._oriented_frame()
-            if oriented is not None:
-                try:
-                    crop = detect_tracking_crop(oriented)
-                    if crop.confidence >= AUTO_APPLY_ROI_CONFIDENCE:
-                        self.canvas.set_rect_roi(tracking_crop_to_rect(crop))
-                        self._loaded_annotation_source = "auto_suggested"
-                        self._roi_user_adjusted = False
-                except ValueError:
-                    pass
+    def _load_sample_data_context(self, *, render_full_preview: bool = True) -> bool:
+        path = self._sample_file_path()
+        if path is None or not path.exists():
+            if render_full_preview:
+                QMessageBox.warning(self, "Load", "File not found.")
+            return False
+        if self._project_root is None or self._current_sample is None:
+            return False
+        sid = str(self._current_sample["sample_id"])
+        ann = get_sample_annotation(self._project_root, sid)
+        ref_idx = int(ann.get("reference_frame_index", 0)) if ann else 0
+        try:
+            frame, idx, total = load_media_frame(path, ref_idx)
+        except MediaLoadError as e:
+            if render_full_preview:
+                QMessageBox.critical(self, "Load", str(e))
+            return False
+        self._base_frame = frame
+        self._frame_index = idx
+        self._reference_frame_index = idx
+        self._total_frames = total
+        self._orientation = OrientationState()
+        self._update_current_sample_panel_fields(sid, frame, idx, total)
 
-        self._preview_mode = "full"
-        self.lbl_preview_mode.setText(self._FULL_PREVIEW_HINT)
-        self.update_tracking_result_panel()
-        self._update_preview_crop_button_visibility()
+        if ann:
+            self._apply_annotation_from_dict(ann, render_canvas=render_full_preview)
+        elif render_full_preview:
+            self._refresh_display(keep_roi=False)
+            self._apply_auto_suggested_roi(render_canvas=True)
+        else:
+            self.canvas.set_rect_roi(None)
+            self._apply_auto_suggested_roi(render_canvas=False)
+
+        if render_full_preview:
+            self._preview_mode = "full"
+            self.lbl_preview_mode.setText(self._FULL_PREVIEW_HINT)
+            self.update_tracking_result_panel()
+            self._update_metric_analysis_button_visibility()
+        return True
+
+    def _load_full_roi_preview_for_current_sample(self) -> None:
+        self._load_sample_data_context(render_full_preview=True)
+
+    def _load_sample_preview(self) -> None:
+        self._load_full_roi_preview_for_current_sample()
 
     def _on_frame_slider(self, value: int) -> None:
         self.spin_frame.blockSignals(True)
@@ -3232,7 +4059,7 @@ class MainWindow(QMainWindow):
                     == QMessageBox.StandardButton.Yes
                 ):
                     delete_empty_batch(self._project_root, group, batch_name)
-                    self._refresh_sample_list()
+            self._refresh_sample_list()
         except (ValueError, OSError) as e:
             QMessageBox.warning(self, "Purge", str(e))
 
@@ -3437,7 +4264,7 @@ class MainWindow(QMainWindow):
         num = parse_batch_number_from_name(batch_name) or 1
         sample_label = display_sample_label(num, batch_name)
         reply = QMessageBox.question(
-            self,
+                self,
             "Delete Empty Sample",
             f"Delete empty sample '{sample_label}' from {group}?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
@@ -3461,7 +4288,7 @@ class MainWindow(QMainWindow):
     def _menu_review_batch(self) -> None:
         self._refresh_sample_list()
         self._status(
-            "Review propagated annotations using Approve / Reject on each data entry."
+            "Review propagated annotations and adjust each ROI as needed."
         )
 
     def _menu_how_to_run(self) -> None:
