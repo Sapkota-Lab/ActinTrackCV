@@ -253,16 +253,12 @@ class CroppedROIPreviewDialog(QDialog):
         parent: QWidget,
         context: CroppedPreviewContext,
         *,
-        on_approve: Callable[[], None] | None = None,
-        on_reject: Callable[[], None] | None = None,
         on_adjust: Callable[[], None] | None = None,
     ):
         super().__init__(parent)
         self.setWindowTitle("Cropped ROI Preview")
         self.resize(720, 560)
         self._ctx = context
-        self._on_approve = on_approve
-        self._on_reject = on_reject
         self._on_adjust = on_adjust
         self._index = 0
         self._playing = False
@@ -277,7 +273,7 @@ class CroppedROIPreviewDialog(QDialog):
         if context.requires_review or context.review_status == "pending":
             self.lbl_warning.setText(
                 "ROI is propagated and pending review. "
-                "Preview is allowed; export still requires approval."
+                "Preview is allowed; review and adjust before export."
             )
             layout.addWidget(self.lbl_warning)
         elif context.annotation_source.startswith("propagated"):
@@ -314,21 +310,15 @@ class CroppedROIPreviewDialog(QDialog):
         controls.addStretch()
         layout.addLayout(controls)
 
-        review_row = QHBoxLayout()
-        self.btn_approve = QPushButton("Approve ROI")
-        self.btn_approve.clicked.connect(self._approve)
-        self.btn_reject = QPushButton("Reject ROI")
-        self.btn_reject.clicked.connect(self._reject)
+        action_row = QHBoxLayout()
         self.btn_adjust = QPushButton("Adjust ROI")
         self.btn_adjust.clicked.connect(self._adjust)
         self.btn_close = QPushButton("Close")
         self.btn_close.clicked.connect(self.accept)
-        review_row.addWidget(self.btn_approve)
-        review_row.addWidget(self.btn_reject)
-        review_row.addWidget(self.btn_adjust)
-        review_row.addStretch()
-        review_row.addWidget(self.btn_close)
-        layout.addLayout(review_row)
+        action_row.addWidget(self.btn_adjust)
+        action_row.addStretch()
+        action_row.addWidget(self.btn_close)
+        layout.addLayout(action_row)
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._advance_frame)
@@ -448,16 +438,6 @@ class CroppedROIPreviewDialog(QDialog):
             f"(cropped {w}×{h} px)"
         )
 
-    def _approve(self) -> None:
-        if self._on_approve:
-            self._on_approve()
-        self.accept()
-
-    def _reject(self) -> None:
-        if self._on_reject:
-            self._on_reject()
-        self.accept()
-
     def _adjust(self) -> None:
         if self._on_adjust:
             self._on_adjust()
@@ -498,8 +478,6 @@ def open_cropped_roi_preview(
     dlg = CroppedROIPreviewDialog(
         main_window,
         ctx,
-        on_approve=lambda: main_window._on_approve_roi(),
-        on_reject=lambda: main_window._on_reject_roi(),
         on_adjust=lambda: None,
     )
     dlg.exec()

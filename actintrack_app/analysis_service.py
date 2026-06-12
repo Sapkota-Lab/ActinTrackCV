@@ -42,6 +42,13 @@ class SampleMetrics:
     result_updated_at: Optional[str] = None
     has_valid_result: bool = False
     failure_reason: str = ""
+    of_general_movement: Optional[float] = None
+    of_downward_motion: Optional[float] = None
+    of_net_y_velocity: Optional[float] = None
+    of_directionality_ratio: Optional[float] = None
+    of_valid_pixel_fraction: Optional[float] = None
+    of_has_valid_result: bool = False
+    of_failure_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -65,6 +72,12 @@ class BreedSummaryRow:
     avg_motion_index: Optional[float] = None
     std_downward_velocity: Optional[float] = None
     std_general_movement: Optional[float] = None
+    avg_of_general_movement: Optional[float] = None
+    avg_of_downward_motion: Optional[float] = None
+    avg_of_net_y_velocity: Optional[float] = None
+    avg_of_directionality_ratio: Optional[float] = None
+    avg_of_valid_pixel_fraction: Optional[float] = None
+    samples_with_of_results: int = 0
 
 
 @dataclass(frozen=True)
@@ -89,6 +102,12 @@ def _draft_tracking_path(root: Path, data_id: str) -> Path | None:
     from actintrack_app.schema_compat import resolve_draft_tracking_path
 
     return resolve_draft_tracking_path(root, data_id)
+
+
+def _draft_optical_flow_path(root: Path, data_id: str) -> Path | None:
+    from actintrack_app.schema_compat import resolve_draft_optical_flow_path
+
+    return resolve_draft_optical_flow_path(root, data_id)
 
 
 def _motion_index_path_for_row(root: Path, row: dict[str, Any]) -> Optional[Path]:
@@ -187,6 +206,69 @@ def load_tracking_metrics_for_sample(
     return SampleMetrics(has_valid_result=False)
 
 
+def _parse_optical_flow_payload(data: dict[str, Any]) -> SampleMetrics:
+    if not data.get("has_valid_result"):
+        reason = str(data.get("failure_reason", "")).strip()
+        return SampleMetrics(
+            of_has_valid_result=False,
+            of_failure_reason=reason or "Optical flow not computed.",
+        )
+
+    def _opt_float(key: str) -> Optional[float]:
+        value = data.get(key)
+        if value is None or value == "":
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    return SampleMetrics(
+        of_general_movement=_opt_float("optical_flow_general_movement_um_s"),
+        of_downward_motion=_opt_float("optical_flow_downward_motion_um_s"),
+        of_net_y_velocity=_opt_float("optical_flow_net_y_velocity_um_s"),
+        of_directionality_ratio=_opt_float("optical_flow_directionality_ratio"),
+        of_valid_pixel_fraction=_opt_float("optical_flow_valid_pixel_fraction"),
+        of_has_valid_result=True,
+    )
+
+
+def load_optical_flow_metrics_for_sample(root: Path, sample_id: str) -> SampleMetrics:
+    root = Path(root).resolve()
+    draft = _draft_optical_flow_path(root, sample_id)
+    if draft is not None:
+        try:
+            data = json.loads(draft.read_text(encoding="utf-8"))
+            return _parse_optical_flow_payload(data)
+        except (OSError, json.JSONDecodeError):
+            pass
+    return SampleMetrics(of_has_valid_result=False)
+
+
+def _merge_sample_metrics(
+    template: SampleMetrics,
+    optical_flow: SampleMetrics,
+) -> SampleMetrics:
+    return SampleMetrics(
+        downward_velocity=template.downward_velocity,
+        general_movement=template.general_movement,
+        motion_index=template.motion_index,
+        valid_tracks=template.valid_tracks,
+        valid_steps=template.valid_steps,
+        confidence=template.confidence,
+        result_updated_at=template.result_updated_at,
+        has_valid_result=template.has_valid_result,
+        failure_reason=template.failure_reason,
+        of_general_movement=optical_flow.of_general_movement,
+        of_downward_motion=optical_flow.of_downward_motion,
+        of_net_y_velocity=optical_flow.of_net_y_velocity,
+        of_directionality_ratio=optical_flow.of_directionality_ratio,
+        of_valid_pixel_fraction=optical_flow.of_valid_pixel_fraction,
+        of_has_valid_result=optical_flow.of_has_valid_result,
+        of_failure_reason=optical_flow.of_failure_reason,
+    )
+
+
 def _status_label(
     *,
     has_data: bool,
@@ -236,11 +318,17 @@ def compute_sample_analysis(
 
     primary = data_rows[0]
     primary_id = str(primary.get("sample_id", "")).strip()
-    metrics = (
+    template_metrics = (
         load_tracking_metrics_for_sample(root, primary_id, primary)
         if primary_id
         else SampleMetrics(has_valid_result=False)
     )
+    of_metrics = (
+        load_optical_flow_metrics_for_sample(root, primary_id)
+        if primary_id
+        else SampleMetrics(of_has_valid_result=False)
+    )
+    metrics = _merge_sample_metrics(template_metrics, of_metrics)
     proc_status = str(primary.get("processing_status", "")).strip()
     return SampleAnalysisRow(
         breed=breed,
@@ -277,6 +365,26 @@ def compute_breed_analysis(
     downward = [r.metrics.downward_velocity for r in valid if r.metrics.downward_velocity is not None]
     general = [r.metrics.general_movement for r in valid if r.metrics.general_movement is not None]
     motion = [r.metrics.motion_index for r in valid if r.metrics.motion_index is not None]
+    of_valid = [r for r in sample_rows if r.metrics.of_has_valid_result]
+    of_general = [
+        r.metrics.of_general_movement for r in of_valid if r.metrics.of_general_movement is not None
+    ]
+    of_downward = [
+        r.metrics.of_downward_motion for r in of_valid if r.metrics.of_downward_motion is not None
+    ]
+    of_net_y = [
+        r.metrics.of_net_y_velocity for r in of_valid if r.metrics.of_net_y_velocity is not None
+    ]
+    of_dir = [
+        r.metrics.of_directionality_ratio
+        for r in of_valid
+        if r.metrics.of_directionality_ratio is not None
+    ]
+    of_valid_frac = [
+        r.metrics.of_valid_pixel_fraction
+        for r in of_valid
+        if r.metrics.of_valid_pixel_fraction is not None
+    ]
 
     return BreedSummaryRow(
         breed=breed,
@@ -287,6 +395,12 @@ def compute_breed_analysis(
         avg_motion_index=_mean(motion),
         std_downward_velocity=_std(downward),
         std_general_movement=_std(general),
+        avg_of_general_movement=_mean(of_general),
+        avg_of_downward_motion=_mean(of_downward),
+        avg_of_net_y_velocity=_mean(of_net_y),
+        avg_of_directionality_ratio=_mean(of_dir),
+        avg_of_valid_pixel_fraction=_mean(of_valid_frac),
+        samples_with_of_results=len(of_valid),
     )
 
 
