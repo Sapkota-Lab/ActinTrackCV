@@ -69,6 +69,35 @@ STATUS_MOTION_INDEX_FAILED = "motion_index_failed"
 STATUS_FAILED = "failed"
 STATUS_MISSING_FILE = "missing_file"
 
+# User-facing Sample status labels. Internal enum values are preserved for
+# compatibility; this maps them to clean wording (no legacy "raw_imported").
+_SAMPLE_STATUS_LABELS = {
+    "": "Raw",
+    STATUS_IMPORTED: "Raw",
+    STATUS_RAW_IMPORTED: "Raw",
+    STATUS_UNANNOTATED: "Raw",
+    STATUS_CUTOFF_MARKED: "Raw",
+    "cutoff_marked": "Raw",
+    STATUS_ROI_MARKED: "ROI marked",
+    STATUS_ROI_PROPAGATED: "ROI marked",
+    STATUS_ROI_APPROVED: "ROI marked",
+    STATUS_PROCESSED: "ROI marked",
+    STATUS_MOTION_INDEX_GENERATED: "ROI marked",
+    STATUS_MOTION_INDEX_FAILED: "ROI marked",
+    STATUS_FAILED: "Raw",
+    STATUS_MISSING_FILE: "Missing file",
+}
+
+
+def sample_status_label(status: str) -> str:
+    """Map an internal processing_status to a clean user-facing label.
+
+    "Raw" means Data exists but no ROI is marked. "ROI marked" means an ROI
+    exists (auto-suggested or manual). Metric freshness is shown separately.
+    """
+    return _SAMPLE_STATUS_LABELS.get(str(status).strip(), "Raw")
+
+
 F_ACTIN_MOTION_INDEX_SUMMARY_CSV = "f_actin_motion_index_summary.csv"
 
 DATA_FILES_CSV_COLUMNS = [

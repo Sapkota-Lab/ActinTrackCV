@@ -353,6 +353,20 @@ def save_sample_crop_annotation(
     save_crop_metadata(crop_meta_path, data)
 
 
+def remove_sample_crop_annotation(crop_meta_path: Path, sample_id: str) -> bool:
+    """Remove a per-sample annotation from crop_metadata.json.
+
+    Returns True if an annotation existed and was removed.
+    """
+    data = load_crop_metadata(crop_meta_path)
+    samples = data.get("samples", {})
+    if str(sample_id) in samples:
+        del samples[str(sample_id)]
+        save_crop_metadata(crop_meta_path, data)
+        return True
+    return False
+
+
 def get_sample_annotation(root: Path, sample_id: str) -> dict[str, Any] | None:
     crop_path = Path(root).resolve() / METADATA_DIR / CROP_METADATA_JSON
     data = load_crop_metadata(crop_path)

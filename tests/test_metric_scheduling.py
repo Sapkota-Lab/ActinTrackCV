@@ -16,8 +16,8 @@ from actintrack_app.utils import METADATA_DIR, SAMPLES_CSV, STATUS_ROI_MARKED
 
 
 class MetricSchedulingTests(unittest.TestCase):
-    def test_metric_debounce_is_five_seconds(self) -> None:
-        self.assertEqual(METRIC_DEBOUNCE_MS, 5000)
+    def test_metric_debounce_is_two_point_five_seconds(self) -> None:
+        self.assertEqual(METRIC_DEBOUNCE_MS, 2500)
 
     def test_overlay_defaults(self) -> None:
         defaults = OpticalFlowVisualizationSettings()

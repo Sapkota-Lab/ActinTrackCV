@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -86,6 +87,7 @@ from actintrack_app.metadata import (
     get_sample_annotation,
     load_crop_metadata,
     migrate_workspace_schema,
+    remove_sample_crop_annotation,
     remove_samples_from_metadata,
     save_sample_crop_annotation,
     sync_samples_with_disk,
@@ -171,6 +173,7 @@ from actintrack_app.utils import (
     STATUS_ROI_PROPAGATED,
     STATUS_UNANNOTATED,
     SCOPE_SELECTED,
+    sample_status_label,
 )
 from actintrack_app.video_processing import MediaLoadError, load_media_frame
 
@@ -179,7 +182,7 @@ APP_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SOURCE_ROOT = APP_ROOT / "raw_source"
 AUTO_APPLY_ROI_CONFIDENCE = 0.15
 DRAFT_TRACKING_DIR = "draft_tracking"
-METRIC_DEBOUNCE_MS = 5000
+METRIC_DEBOUNCE_MS = 2500
 _METRIC_ANALYSIS_VIEW_LABEL = "Metric Analysis View"
 
 _ADVANCED_SAMPLE_STATUSES = frozenset(
@@ -390,6 +393,14 @@ class MainWindow(QMainWindow):
             self._on_metric_settings_debounce_fired
         )
         self._of_flow_caches: dict[str, OpticalFlowFlowCache] = {}
+        # Per-Sample metric scheduling/state (decoupled from the live canvas).
+        self._metrics_inflight: set[str] = set()
+        self._metric_error_by_sample: dict[str, bool] = {}
+        self._metric_compute_queue: list[str] = []
+        self._metric_flush_timer = QTimer(self)
+        self._metric_flush_timer.setSingleShot(True)
+        self._metric_flush_timer.setInterval(150)
+        self._metric_flush_timer.timeout.connect(self._on_metric_flush_timer)
 
         self._build_ui()
         self._set_tracking_settings_editable(False)
@@ -442,8 +453,23 @@ class MainWindow(QMainWindow):
         )
         self.btn_metric_analysis.hide()
         preview_crop_row.addWidget(self.btn_metric_analysis)
+        self.btn_run_metrics = self._tool_button(
+            "Run Metrics",
+            "Compute Template Tracking and Optical Flow metrics for the current "
+            "Sample using its marked ROI.",
+            self._on_run_metrics_clicked,
+        )
+        self.btn_run_metrics.setEnabled(False)
+        self.btn_run_metrics.hide()
+        preview_crop_row.addWidget(self.btn_run_metrics)
         preview_crop_row.addStretch()
         center_layout.addLayout(preview_crop_row)
+
+        self.lbl_metric_freshness = QLabel("Not analyzed yet")
+        self.lbl_metric_freshness.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        self.lbl_metric_freshness.setStyleSheet("color: #888; font-size: 11px;")
+        self.lbl_metric_freshness.hide()
+        center_layout.addWidget(self.lbl_metric_freshness)
 
         preview_controls = QVBoxLayout()
         preview_controls.setSpacing(4)
@@ -644,19 +670,16 @@ class MainWindow(QMainWindow):
         return box
 
     def _build_frame_panel(self) -> QGroupBox:
-        box = QGroupBox("Reference Frame")
+        box = QGroupBox("Frame")
         layout = QVBoxLayout(box)
         self.lbl_frame_info = QLabel("Frame: —")
         self.slider_frame = QSlider(Qt.Orientation.Horizontal)
         self.slider_frame.valueChanged.connect(self._on_frame_slider)
         self.spin_frame = QSpinBox()
         self.spin_frame.valueChanged.connect(self._on_frame_spin)
-        self.btn_set_reference = QPushButton("Use Current Frame as Reference")
-        self.btn_set_reference.clicked.connect(self._on_set_reference_frame)
         layout.addWidget(self.lbl_frame_info)
         layout.addWidget(self.slider_frame)
         layout.addWidget(self.spin_frame)
-        layout.addWidget(self.btn_set_reference)
         return box
 
     def _build_selected_panel(self) -> QGroupBox:
@@ -1277,12 +1300,17 @@ class MainWindow(QMainWindow):
         return f"{sample_id}'s Tracking Result"
 
     def _update_metric_analysis_button_visibility(self) -> None:
-        show = (
-            self._current_sample_id is not None
-            and not self._metric_analysis_view_active
-            and self._base_frame is not None
+        has_sample = (
+            self._current_sample_id is not None and self._base_frame is not None
         )
-        self.btn_metric_analysis.setVisible(show)
+        self.btn_metric_analysis.setVisible(
+            has_sample and not self._metric_analysis_view_active
+        )
+        if hasattr(self, "btn_run_metrics"):
+            self.btn_run_metrics.setVisible(has_sample)
+        if hasattr(self, "lbl_metric_freshness"):
+            self.lbl_metric_freshness.setVisible(has_sample)
+        self._update_metric_freshness_label()
 
     def _clear_metric_preview_state(self) -> None:
         self._clear_sample_specific_metric_state()
@@ -1341,6 +1369,7 @@ class MainWindow(QMainWindow):
             self.update_tracking_result_panel()
         if self._preview_mode == "cropped_tracking":
             self._schedule_metric_settings_refresh()
+        self._update_metric_freshness_label()
 
     def _on_optical_flow_setting_changed(self, *_args: object) -> None:
         if self._current_sample_id:
@@ -1350,6 +1379,7 @@ class MainWindow(QMainWindow):
             self.update_tracking_result_panel()
         if self._preview_mode == "cropped_tracking":
             self._schedule_metric_settings_refresh()
+        self._update_metric_freshness_label()
 
     @staticmethod
     def _status_after_roi_autosave(current_status: str) -> Optional[str]:
@@ -1429,6 +1459,7 @@ class MainWindow(QMainWindow):
         self._metric_debounce_timer.start()
         if show_scheduled:
             self._set_roi_save_status("Metric calculation scheduled", saved=True)
+        self._update_metric_freshness_label()
 
     def _schedule_metric_settings_refresh(self) -> None:
         if self._preview_mode != "cropped_tracking":
@@ -1761,6 +1792,7 @@ class MainWindow(QMainWindow):
         self._save_draft_optical_flow_result(sample_id, result)
         self._update_optical_flow_qc_readout()
         self.update_tracking_result_panel(sample_id)
+        self._update_metric_freshness_label()
         self._refresh_analysis_if_visible()
 
     @staticmethod
@@ -1896,7 +1928,7 @@ class MainWindow(QMainWindow):
             if not export_name:
                 export_name = str(data.get("sample_id", sample_id))
             original = str(data.get("original_filename", ""))
-            item.setText(f"    [{status}] {export_name} — {original}")
+            item.setText(f"    [{sample_status_label(status)}] {export_name} — {original}")
             item.setData(Qt.ItemDataRole.UserRole, data)
             color = STATUS_COLORS.get(status)
             if color:
@@ -2126,6 +2158,7 @@ class MainWindow(QMainWindow):
             "num_tracks_requested": params.num_starting_points,
             "total_valid_steps": analysis.total_valid_steps,
             "tracking_warning": analysis.tracking_warning,
+            "analysis_timestamp_utc": datetime.now(timezone.utc).isoformat(),
             "parameters": asdict(params),
         }
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -2154,7 +2187,335 @@ class MainWindow(QMainWindow):
         self._tracking_result_stale_by_sample.pop(sample_id, None)
         self._save_draft_tracking_result(sample_id, analysis, params)
         self.update_tracking_result_panel(sample_id)
+        self._update_metric_freshness_label()
         self._refresh_analysis_if_visible()
+
+    # ----- Decoupled per-Sample metric calculation -------------------------
+    # The live-canvas debounce path keeps the Metric Analysis View preview in
+    # sync for the *current* Sample. These helpers compute metrics for any
+    # Sample from its *saved* orientation + ROI so quick Sample switching never
+    # loses analysis. Results commit by sample_id regardless of which Sample is
+    # currently selected.
+
+    def _commit_tracking_result_for_sid(
+        self,
+        sample_id: str,
+        analysis: CroppedPreviewAnalysis,
+        params: MotionIndexParams,
+    ) -> None:
+        self._tracking_results_by_sample[sample_id] = analysis
+        self._tracking_result_stale_by_sample.pop(sample_id, None)
+        self._save_draft_tracking_result(sample_id, analysis, params)
+        if sample_id == self._current_sample_id:
+            self.update_tracking_result_panel(sample_id)
+
+    def _commit_optical_flow_result_for_sid(
+        self, sample_id: str, result: OpticalFlowResult
+    ) -> None:
+        self._optical_flow_results_by_sample[sample_id] = result
+        self._optical_flow_stale_by_sample.pop(sample_id, None)
+        self._clear_of_flow_cache(sample_id)
+        self._save_draft_optical_flow_result(sample_id, result)
+        if sample_id == self._current_sample_id:
+            self._update_optical_flow_qc_readout()
+            self.update_tracking_result_panel(sample_id)
+
+    def _saved_orientation_roi_for_sample(
+        self, sample_id: str
+    ) -> tuple[Optional[OrientationState], Optional[RectROI]]:
+        if self._project_root is None:
+            return None, None
+        ann = get_sample_annotation(self._project_root, sample_id)
+        if not ann:
+            return None, None
+        orientation, roi = annotation_from_legacy(ann)
+        return orientation, roi
+
+    def _sample_video_path(self, sample_id: str) -> Optional[Path]:
+        row = self._sample_row_for_id(sample_id)
+        if row is None or self._project_root is None:
+            return None
+        stored = str(row.get("stored_path", "")).strip()
+        if not stored:
+            return None
+        path = self._project_root / stored
+        if not path.is_file() or not is_supported_video_path(path):
+            return None
+        return path
+
+    def _sample_has_valid_data_and_roi(self, sample_id: str) -> bool:
+        if self._sample_video_path(sample_id) is None:
+            return False
+        _orientation, roi = self._saved_orientation_roi_for_sample(sample_id)
+        return roi is not None
+
+    def _compute_metrics_for_sample(self, sample_id: str) -> str:
+        """Compute Template Tracking + Optical Flow for one Sample from its
+        saved orientation/ROI and current metric settings.
+
+        Returns one of: 'unavailable', 'running', 'error', 'analyzed'.
+        """
+        if self._project_root is None:
+            return "unavailable"
+        if sample_id in self._metrics_inflight:
+            return "running"
+        path = self._sample_video_path(sample_id)
+        if path is None:
+            return "unavailable"
+        orientation, roi = self._saved_orientation_roi_for_sample(sample_id)
+        if roi is None or orientation is None:
+            return "unavailable"
+        try:
+            params = self._tracking_params_from_ui()
+            of_settings = self._optical_flow_settings_from_ui()
+        except ValueError:
+            self._metric_error_by_sample[sample_id] = True
+            return "error"
+        crop_w, crop_h = int(roi.width), int(roi.height)
+        min_dim = params.template_patch_size_px + (2 * params.search_radius_px) + 2
+        if min(crop_w, crop_h) < min_dim:
+            self._metric_error_by_sample[sample_id] = True
+            return "error"
+
+        self._metrics_inflight.add(sample_id)
+        self._update_metric_freshness_label()
+        QApplication.processEvents()
+        had_error = False
+        ok_any = False
+        try:
+            frames = load_cropped_frames_from_video(path, orientation, roi)
+            try:
+                analysis = analyze_cropped_preview(frames, params=params)
+                self._commit_tracking_result_for_sid(sample_id, analysis, params)
+                if analysis.num_tracks_with_valid_steps == 0:
+                    had_error = True
+                else:
+                    ok_any = True
+            except Exception:
+                had_error = True
+            roi_bounds = (int(roi.x), int(roi.y), int(roi.width), int(roi.height))
+            try:
+                fingerprint = build_optical_flow_fingerprint(
+                    sample_id=sample_id,
+                    roi_bounds=roi_bounds,
+                    settings=of_settings,
+                    data_identity=str(path.resolve()),
+                    frame_count=len(frames),
+                )
+                result = compute_optical_flow_motion_index(
+                    frames,
+                    of_settings,
+                    sample_id=sample_id,
+                    data_identity=str(path.resolve()),
+                    roi_bounds=roi_bounds,
+                    fingerprint=fingerprint,
+                )
+                self._commit_optical_flow_result_for_sid(sample_id, result)
+                if result.has_valid_result:
+                    ok_any = True
+                else:
+                    had_error = True
+            except Exception:
+                had_error = True
+        except Exception:
+            had_error = True
+        finally:
+            self._metrics_inflight.discard(sample_id)
+
+        self._metric_error_by_sample[sample_id] = had_error and not ok_any
+        if sample_id == self._current_sample_id:
+            self.update_tracking_result_panel(sample_id)
+        self._update_metric_freshness_label()
+        self._refresh_analysis_if_visible()
+        if had_error and not ok_any:
+            return "error"
+        return "analyzed"
+
+    def ensure_metrics_scheduled_for_sample_if_needed(
+        self, sample_id: Optional[str], reason: str = ""
+    ) -> None:
+        """Queue metric calculation for a Sample if it has valid Data + ROI and
+        its metrics are missing/stale and not already queued or running."""
+        if not sample_id or self._project_root is None:
+            return
+        if sample_id in self._metrics_inflight:
+            return
+        if sample_id in self._metric_compute_queue:
+            return
+        if not self._sample_has_valid_data_and_roi(sample_id):
+            return
+        state = self._metric_state_for_sample(sample_id)
+        if state in ("analyzed", "running", "scheduled"):
+            return
+        self._metric_compute_queue.append(sample_id)
+        if not self._metric_flush_timer.isActive():
+            self._metric_flush_timer.start()
+        if sample_id == self._current_sample_id:
+            self._update_metric_freshness_label()
+
+    def _on_metric_flush_timer(self) -> None:
+        if not self._metric_compute_queue:
+            return
+        sample_id = self._metric_compute_queue.pop(0)
+        try:
+            self._compute_metrics_for_sample(sample_id)
+        finally:
+            if self._metric_compute_queue:
+                self._metric_flush_timer.start()
+
+    def run_metrics_now_for_current_sample(self) -> None:
+        sid = self._current_sample_id
+        if not sid:
+            return
+        if sid in self._metrics_inflight:
+            self._set_roi_save_status("Analyzing metrics…", saved=True)
+            return
+        if not self._sample_has_valid_data_and_roi(sid):
+            self._set_roi_save_status(
+                "Analysis unavailable — mark an ROI first", saved=False
+            )
+            self._update_metric_freshness_label()
+            return
+        if sid in self._metric_compute_queue:
+            self._metric_compute_queue.remove(sid)
+        self._set_roi_save_status("Analyzing metrics…", saved=True)
+        self._compute_metrics_for_sample(sid)
+
+    # ----- Metric freshness state + rendering ------------------------------
+
+    def _read_draft_tracking_payload(self, sid: str) -> Optional[dict[str, Any]]:
+        if self._project_root is None:
+            return None
+        from actintrack_app.schema_compat import resolve_draft_tracking_path
+
+        path = resolve_draft_tracking_path(self._project_root, sid)
+        if path is None:
+            return None
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    def _read_draft_optical_flow_payload(self, sid: str) -> Optional[dict[str, Any]]:
+        if self._project_root is None:
+            return None
+        from actintrack_app.schema_compat import resolve_draft_optical_flow_path
+
+        path = resolve_draft_optical_flow_path(self._project_root, sid)
+        if path is None:
+            return None
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    def _metric_state_for_sample(self, sid: Optional[str]) -> str:
+        if not sid:
+            return "unavailable_no_roi"
+        if sid in self._metrics_inflight:
+            return "running"
+        if sid == self._current_sample_id and (
+            self._tracking_job_running or self._optical_flow_job_running
+        ):
+            return "running"
+        if not self._sample_has_valid_data_and_roi(sid):
+            return "unavailable_no_roi"
+        if sid in self._metric_compute_queue:
+            return "scheduled"
+        if sid == self._current_sample_id and (
+            self._metric_debounce_timer.isActive()
+            or self._metric_settings_timer.isActive()
+        ) and (
+            self._pending_tracking_snapshot is not None
+            or self._pending_optical_flow_snapshot is not None
+        ):
+            return "scheduled"
+
+        track = self._read_draft_tracking_payload(sid)
+        of = self._read_draft_optical_flow_payload(sid)
+        track_present = track is not None
+        of_present = of is not None
+        if not track_present and not of_present:
+            return "not_analyzed"
+        track_ok = track_present and int(
+            track.get("num_tracks_with_valid_steps", 0) or 0
+        ) > 0
+        of_ok = of_present and bool(of.get("has_valid_result"))
+        stale_flag = bool(
+            self._tracking_result_stale_by_sample.get(sid)
+        ) or bool(self._optical_flow_stale_by_sample.get(sid))
+        error_flag = bool(self._metric_error_by_sample.get(sid)) or (
+            track_present and not track_ok
+        ) or (of_present and not of_ok)
+        if error_flag:
+            return "error"
+        if stale_flag:
+            return "stale"
+        if track_ok and of_ok:
+            return "analyzed"
+        # Only one metric present (e.g. legacy) — not fully analyzed.
+        return "stale"
+
+    def _last_analyzed_at_for_sample(self, sid: str) -> Optional[datetime]:
+        stamps: list[datetime] = []
+        for payload in (
+            self._read_draft_tracking_payload(sid),
+            self._read_draft_optical_flow_payload(sid),
+        ):
+            if not payload:
+                continue
+            raw = str(payload.get("analysis_timestamp_utc", "")).strip()
+            if not raw:
+                continue
+            try:
+                stamps.append(datetime.fromisoformat(raw))
+            except ValueError:
+                continue
+        if not stamps:
+            return None
+        return max(stamps)
+
+    @staticmethod
+    def _fmt_local_dt(dt: datetime) -> str:
+        try:
+            local = dt.astimezone()
+        except ValueError:
+            local = dt
+        hour = local.hour % 12 or 12
+        ampm = "AM" if local.hour < 12 else "PM"
+        return f"{local.strftime('%b')} {local.day}, {local.year}, {hour}:{local.minute:02d} {ampm}"
+
+    def render_metric_freshness_text(self, sid: Optional[str]) -> str:
+        state = self._metric_state_for_sample(sid)
+        if state == "unavailable_no_roi":
+            return "Analysis unavailable — mark an ROI first"
+        if state == "not_analyzed":
+            return "Not analyzed yet"
+        if state == "scheduled":
+            return "Metric calculation scheduled"
+        if state == "running":
+            return "Analyzing metrics…"
+        if state == "error":
+            return "Metric calculation error"
+        if state == "analyzed":
+            ts = self._last_analyzed_at_for_sample(sid) if sid else None
+            return f"Analyzed: {self._fmt_local_dt(ts)}" if ts else "Analyzed"
+        if state == "stale":
+            ts = self._last_analyzed_at_for_sample(sid) if sid else None
+            if ts:
+                return f"Needs analysis — last analyzed {self._fmt_local_dt(ts)}"
+            return "Needs analysis"
+        return "Not analyzed yet"
+
+    def _update_metric_freshness_label(self) -> None:
+        if not hasattr(self, "lbl_metric_freshness"):
+            return
+        sid = self._current_sample_id
+        self.lbl_metric_freshness.setText(self.render_metric_freshness_text(sid))
+        has_roi = bool(sid) and self._sample_has_valid_data_and_roi(sid)
+        if hasattr(self, "btn_run_metrics"):
+            running = bool(sid) and sid in self._metrics_inflight
+            self.btn_run_metrics.setEnabled(has_roi and not running)
 
     def _update_orientation_label(self) -> None:
         self.chk_mirror_y.blockSignals(True)
@@ -2233,8 +2594,10 @@ class MainWindow(QMainWindow):
         self._loaded_annotation_source = ann["annotation_source"]
         self._roi_user_adjusted = False
         self._roi_autosave_pending = False
+        self._metric_error_by_sample.pop(sid, None)
         self._set_roi_save_status("ROI autosaved", saved=True)
         self._schedule_debounced_metrics(show_scheduled=True)
+        self._update_metric_freshness_label()
         return True
 
     def _on_apply_custom_angle(self) -> None:
@@ -2280,6 +2643,34 @@ class MainWindow(QMainWindow):
         self._roi_user_adjusted = True
         self._roi_autosave_pending = False
         self._set_roi_save_status("ROI cleared", saved=False)
+        self._persist_roi_cleared_for_current_sample()
+        self._update_metric_freshness_label()
+
+    def _persist_roi_cleared_for_current_sample(self) -> None:
+        """Clearing the ROI returns the Sample to Raw and drops stale metrics."""
+        if self._project_root is None or self._current_sample is None:
+            return
+        sid = str(self._current_sample.get("sample_id", "")).strip()
+        if not sid:
+            return
+        current_status = str(self._current_sample.get("processing_status", ""))
+        if current_status in _ADVANCED_SAMPLE_STATUSES:
+            # Exported/processed Samples keep their advanced status.
+            return
+        try:
+            crop_path = self._project_root / METADATA_DIR / CROP_METADATA_JSON
+            remove_sample_crop_annotation(crop_path, sid)
+            update_samples_csv(
+                self._project_root / METADATA_DIR / SAMPLES_CSV,
+                {"sample_id": sid, "processing_status": STATUS_RAW_IMPORTED},
+            )
+        except OSError:
+            return
+        self._current_sample["processing_status"] = STATUS_RAW_IMPORTED
+        self._loaded_annotation_source = "manual"
+        self._invalidate_tracking_result_for_sample(sid)
+        self._update_sample_list_row_for_id(sid)
+        self._refresh_analysis_if_visible()
 
     def _tracking_params_from_ui(self) -> MotionIndexParams:
         patch = int(self.spin_track_patch.value())
@@ -2307,6 +2698,9 @@ class MainWindow(QMainWindow):
 
     def _on_show_metric_analysis_view(self) -> None:
         self.enter_metric_analysis_view_for_current_sample(quiet=False)
+
+    def _on_run_metrics_clicked(self) -> None:
+        self.run_metrics_now_for_current_sample()
 
     def enter_metric_analysis_view_for_current_sample(
         self,
@@ -3248,12 +3642,41 @@ class MainWindow(QMainWindow):
         if self._preview_mode == "cropped_tracking":
             self.reset_preview_state(clear_image=True)
         self._after_import_refresh(group=breed, batch_name=str(batch["batch_name"]))
+        self._auto_suggest_roi_for_new_sample(str(batch.get("sample_id", "")))
         self._refresh_analysis_if_visible()
         label = display_sample_label(
             int(batch.get("batch_number", 1) or 1),
             str(batch.get("batch_name", "")),
         )
         self._status(f"Added {label} from {source.name}")
+
+    def _auto_suggest_roi_for_new_sample(self, sample_id: str) -> None:
+        """Persist an auto-suggested ROI for a freshly added Sample.
+
+        ``_after_import_refresh`` already selected the Sample and ran the
+        auto-suggestion onto the canvas (when confidence is high enough). Here
+        we persist that suggestion so the Sample becomes "ROI marked" and gets
+        metrics scheduled. If no ROI was suggested, the Sample stays "Raw".
+        """
+        if self._project_root is None or self._current_sample is None:
+            return
+        sid = str(self._current_sample.get("sample_id", "")).strip()
+        if not sid or (sample_id and sid != str(sample_id).strip()):
+            return
+        status = str(self._current_sample.get("processing_status", ""))
+        if status not in _ROI_STATUS_UPGRADE_FROM and status != "":
+            return
+        suggested = self.canvas.rect_roi() is not None and str(
+            self._loaded_annotation_source
+        ).startswith("auto_suggested")
+        if suggested:
+            if self._autosave_roi(quiet=True):
+                self._status(f"Auto-suggested ROI for {sid}")
+        else:
+            self._set_roi_save_status(
+                "Could not auto-suggest an ROI — mark one manually.", saved=False
+            )
+        self._update_metric_freshness_label()
 
     def _select_sample_header(self, group: str, batch_name: str) -> None:
         safe = sanitize_batch_name(batch_name)
@@ -3357,7 +3780,7 @@ class MainWindow(QMainWindow):
         if not export_name:
             export_name = str(row["sample_id"])
         original = str(row.get("original_filename", ""))
-        label = f"    [{status}] {export_name} — {original}"
+        label = f"    [{sample_status_label(status)}] {export_name} — {original}"
         item = QListWidgetItem(label)
         sample_data = row.to_dict()
         sample_data["item_type"] = "sample"
@@ -3523,6 +3946,13 @@ class MainWindow(QMainWindow):
         was_metric_analysis_view = self._metric_analysis_view_active
         resume_playback = self._preview_playing if was_metric_analysis_view else False
 
+        prev_sid = self._current_sample_id
+        new_sid = str(data.get("sample_id", "")).strip() or None
+        if prev_sid and prev_sid != new_sid:
+            self.ensure_metrics_scheduled_for_sample_if_needed(
+                prev_sid, reason="switch_away"
+            )
+
         self._set_active_sample(data)
         group = str(data.get("group", ""))
         if group and group in GROUPS and self.combo_filter_group.currentText() != group:
@@ -3559,6 +3989,7 @@ class MainWindow(QMainWindow):
         finally:
             self._preview_page.setUpdatesEnabled(True)
             self._preview_page.update()
+        self._update_metric_freshness_label()
 
     def _sample_file_path(self) -> Optional[Path]:
         if self._project_root is None or self._current_sample is None:
@@ -3723,10 +4154,6 @@ class MainWindow(QMainWindow):
                 )
         h, w = frame.shape[:2]
         self.lbl_frame_info.setText(f"Frame {idx}/{max(0, total-1)} ({w}×{h})")
-
-    def _on_set_reference_frame(self) -> None:
-        self._reference_frame_index = self._frame_index
-        self._status(f"Reference frame = {self._frame_index}")
 
     def _refresh_recent_menu(self) -> None:
         refresh_recent_workspaces_menu(self)
