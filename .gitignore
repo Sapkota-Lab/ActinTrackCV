@@ -60,3 +60,4 @@ venv/
 models/
 outputs/
 local_context/
+/actintrackcv_macos_exports/
