@@ -63,7 +63,7 @@ Launchers activate `.venv` or `venv` automatically when present. If dependencies
 3. **Select Data** — choose a Sample in the left panel to load its Data
 4. **Orient and ROI** — rotate/flip the frame as needed, then draw a rectangle around the actin-rich region. The ROI **autosaves**; there is no Save ROI button and no Approve/Reject ROI workflow.
 5. **Metric Analysis View** — open from the preview toolbar to enter cropped ROI playback and metric review. Playback loops continuously; use the frame slider to scrub manually. Playback speeds: **0.25×, 0.5×, 1×, 1.5×, 2×**. You can switch Samples while staying in Metric Analysis View.
-6. **Metrics** — Template Tracking and Optical Flow Motion Index calculations are scheduled automatically after ROI autosave or settings changes (5 s debounce). Both run on **cropped ROI frames** using the current orientation and ROI.
+6. **Metrics** — Template Tracking and Optical Flow Motion Index calculations are scheduled automatically after ROI autosave or settings changes (2.5 s debounce). Both run on **cropped ROI frames** using the current orientation and ROI.
 7. **Analysis** — **Analysis → View Analysis…** for read-only aggregation by Breed and Sample from saved per-Sample results (does not re-run metrics).
 
 ### Metric Analysis View
@@ -172,7 +172,7 @@ python -m unittest discover -s tests -v
 
 ## User documentation
 
-Markdown is the source of truth for documentation. See [`ActinTrackCV_User_Documentation_Refined.md`](ActinTrackCV_User_Documentation_Refined.md) for the full user guide. (Previous `.docx` copies have been removed from the repo.)
+See [`ActinTrackCV_User_Documentation_Refined.md`](ActinTrackCV_User_Documentation_Refined.md) for the full user guide. (Previous `.docx` copies have been removed from the repo.)
 
 ## Packaging (in progress)
 
