@@ -28,6 +28,9 @@ venv/
 /frames/
 /frames_index.csv
 
+# Icon source exports (kept locally; canonical icons live in packaging/assets/app/)
+/actintrackcv_icon_exports/
+
 # Microscopy / media (local copies; not repo fixtures)
 *.tif
 *.tiff
