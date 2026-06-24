@@ -24,6 +24,10 @@ venv/
 /previews/
 /raw_source/
 
+# Extracted research frame data (kept locally, not tracked)
+/frames/
+/frames_index.csv
+
 # Microscopy / media (local copies; not repo fixtures)
 *.tif
 *.tiff
