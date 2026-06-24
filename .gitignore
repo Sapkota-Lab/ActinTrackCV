@@ -30,6 +30,7 @@ venv/
 
 # Icon source exports (kept locally; canonical icons live in packaging/assets/app/)
 /actintrackcv_icon_exports/
+/actintrackcv_icons_transparent/
 
 # Microscopy / media (local copies; not repo fixtures)
 *.tif
