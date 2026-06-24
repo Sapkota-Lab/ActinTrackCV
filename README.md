@@ -190,7 +190,14 @@ powershell -ExecutionPolicy Bypass -File packaging/windows/build_windows.ps1
 
 Output: `dist/ActinTrackCV/ActinTrackCV.exe`. This is a debuggable one-folder PyInstaller build. **Clean-machine Windows validation (AVI/MP4 loading on a VM without Python) is still required.** See [`packaging/windows/README.md`](packaging/windows/README.md) and [`packaging/RESOURCES.md`](packaging/RESOURCES.md).
 
-macOS packaging is planned but not yet implemented.
+**Build the macOS `.app` bundle** (scaffolded; debuggable build, not a signed/notarized installer):
+
+```bash
+python -m pip install -r requirements-build.txt
+bash packaging/macos/build_macos.sh
+```
+
+Output: `dist/ActinTrackCV.app`. It is **unsigned** — Gatekeeper will warn on first launch, so right-click → Open. `.dmg`, signing/notarization, and clean-machine AVI/MP4 validation are still pending. See [`packaging/macos/README.md`](packaging/macos/README.md).
 
 ## Not implemented
 
