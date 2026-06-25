@@ -11,13 +11,15 @@ Most users do not need Python or the source code — download the prebuilt app f
 1. Download `ActinTrackCV-0.2.0-macos-arm64.zip` from the latest release.
 2. Unzip it (double-click in Finder).
 3. Open `ActinTrackCV.app`.
-4. Because this build is **unsigned**, macOS may block the first launch. If so:
-   **Right-click (Control-click) `ActinTrackCV.app` → Open → Open.** After the first approval, it opens normally.
+4. Because this build is **unsigned**, macOS may block the first launch. If so, open
+   **System Settings → Privacy & Security**, scroll to the message that *"ActinTrackCV" was blocked*,
+   and click **Open Anyway**. After the first approval, it opens normally.
 
 Notes for this build:
 
-- This is a **macOS Apple Silicon pre-release / internal test build** (not a signed, notarized installer).
+- **Unsigned macOS (Apple Silicon) pre-release / internal test build** — not signed, notarized, or a polished installer. Apple Silicon only (no Intel/universal build yet), and no `.dmg` yet.
 - **AVI/MP4 loading still needs validation on clean Macs with real microscopy videos** — please report any playback issues.
+- ROI auto-suggestion can occasionally fail — press **Suggest** again or draw the ROI manually.
 - Project/workspace data defaults to **`~/Documents/ActinTrackCV`** (created on first launch).
 - Your external AVI/MP4 **Data** files stay outside the app — they are never bundled or deleted.
 
@@ -25,7 +27,7 @@ Notes for this build:
 
 A **Windows 10/11 x64 pre-release** is available as a one-folder zip (not an installer wizard yet).
 
-1. Download `ActinTrackCV-0.2.0-windows-x64-onefolder.zip` from the [**Releases**](https://github.com/Sapkota-Lab/ActinTrackCV/releases) page.
+1. Download `ActinTrackCV-0.2.0-windows-x64.zip` from the [**Releases**](https://github.com/Sapkota-Lab/ActinTrackCV/releases) page.
 2. Unzip it.
 3. Open the `ActinTrackCV` folder.
 4. Double-click `ActinTrackCV.exe`.
@@ -244,7 +246,7 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\build_windows.ps1
 Output: `dist\ActinTrackCV\ActinTrackCV.exe` (one-folder, windowed). Package the **whole** folder into a release zip:
 
 ```powershell
-Compress-Archive -Path dist\ActinTrackCV -DestinationPath ActinTrackCV-0.2.0-windows-x64-onefolder.zip -Force
+Compress-Archive -Path dist\ActinTrackCV -DestinationPath ActinTrackCV-0.2.0-windows-x64.zip -Force
 ```
 
 The build is **unsigned** (SmartScreen warns; More info → Run anyway). An installer wizard and code signing are future work. See [`packaging/windows/README.md`](packaging/windows/README.md).
