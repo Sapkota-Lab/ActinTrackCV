@@ -18,6 +18,7 @@ from actintrack_app.batch_manager import (
     refresh_batch_stats,
     sanitize_batch_name,
 )
+from actintrack_app.debug_log import breadcrumb
 from actintrack_app.export_naming import (
     auto_export_name_for_sample,
     is_video_path,
@@ -184,12 +185,15 @@ def import_files(
         sample_id = _next_sample_id(df, group_name)
         dest_name = f"{sample_id}{src_path.suffix.lower()}"
         dest_path = raw_dir / dest_name
+        breadcrumb("import_files: storing", src=str(src_path), dest=str(dest_path))
         store_imported_video(src_path, dest_path)
         if is_video:
             # Reject a stored video that cannot decode its first frame so we
             # never finalize a Sample that would crash/blank the preview. The
             # caller (create_sample_from_data) rolls back the empty batch.
+            breadcrumb("import_files: validating stored video (assert_video_readable)")
             assert_video_readable(dest_path)
+            breadcrumb("import_files: stored video validated")
 
         record = _build_sample_record(
             sample_id=sample_id,
@@ -204,9 +208,11 @@ def import_files(
         if batch_number is not None:
             record["batch_number"] = str(batch_number)
 
+        breadcrumb("import_files: writing metadata row", sample_id=sample_id)
         df = load_samples_csv(samples_path)
         df = pd.concat([df, pd.DataFrame([record])], ignore_index=True)
         save_samples_csv(samples_path, df)
+        breadcrumb("import_files: metadata row written", sample_id=sample_id)
 
         import_result = dict(record)
         import_result["source_path"] = str(src_path.resolve())

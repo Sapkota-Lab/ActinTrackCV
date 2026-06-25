@@ -13,6 +13,8 @@ USAGE (from anywhere; the script finds the repo root itself):
 OPTIONS:
   -SkipTests   Skip the unittest run (not recommended).
   -KeepOld     Do not delete previous build/ and dist/ActinTrackCV/ first.
+  -Console     Debug build: attach a console so Python tracebacks/ffmpeg output
+               are visible when launched from PowerShell. Do not ship this.
 
 OUTPUT:
   dist\ActinTrackCV\ActinTrackCV.exe   (one-folder, windowed)
@@ -20,10 +22,20 @@ OUTPUT:
 [CmdletBinding()]
 param(
     [switch]$SkipTests,
-    [switch]$KeepOld
+    [switch]$KeepOld,
+    [switch]$Console
 )
 
 $ErrorActionPreference = "Stop"
+
+# -Console enables a debug build with a console attached (the spec reads
+# ACTINTRACKCV_CONSOLE). Leave unset for normal/windowed release builds.
+if ($Console) {
+    $env:ACTINTRACKCV_CONSOLE = "1"
+    Write-Host "Console (debug) build enabled."
+} else {
+    Remove-Item Env:\ACTINTRACKCV_CONSOLE -ErrorAction SilentlyContinue
+}
 
 # This script lives in <repo>\packaging\windows\ ; resolve the repo root from it.
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path

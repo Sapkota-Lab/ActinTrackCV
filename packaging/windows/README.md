@@ -63,6 +63,35 @@ and `_internal\` inside it.
 Because the build is **unsigned**, Windows SmartScreen may warn on first launch:
 click **More info → Run anyway**.
 
+## Debugging a frozen-build crash
+
+A windowed (default) build hides Python tracebacks and can vanish on an
+unhandled error. Two opt-in aids help diagnose import/decoding crashes:
+
+1. **Console debug build** — attach a console so tracebacks/ffmpeg output are
+   visible when launched from PowerShell:
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File packaging\windows\build_windows.ps1 -Console
+   .\dist\ActinTrackCV\ActinTrackCV.exe   # run from PowerShell to see output
+   ```
+
+2. **Breadcrumb log** — set `ACTINTRACKCV_DEBUG=1` before launching to append
+   flushed checkpoints of the Add Sample import path to
+   `Documents\ActinTrackCV\logs\import_debug.log`. Because each line is flushed
+   and fsynced, the last line survives even a hard native crash, pinpointing the
+   failing step (validation, dimension probe, ffmpeg normalization, etc.):
+
+   ```powershell
+   $env:ACTINTRACKCV_DEBUG = "1"
+   .\dist\ActinTrackCV\ActinTrackCV.exe
+   # reproduce the crash, then inspect:
+   Get-Content "$env:USERPROFILE\Documents\ActinTrackCV\logs\import_debug.log" -Tail 40
+   ```
+
+Both are temporary debugging aids. Release builds must leave `-Console` off and
+do not require `ACTINTRACKCV_DEBUG` (logging is a no-op when it is unset).
+
 ## What is NOT bundled (by design)
 
 User/project data stays in the workspace at runtime, not in the app:

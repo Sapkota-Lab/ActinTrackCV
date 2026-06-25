@@ -176,6 +176,7 @@ from actintrack_app.utils import (
     sample_status_label,
 )
 from actintrack_app.video_processing import MediaLoadError, load_media_frame
+from actintrack_app.debug_log import breadcrumb
 from actintrack_app.__version__ import __version__
 from actintrack_app.paths import (
     app_root,
@@ -3650,14 +3651,20 @@ class MainWindow(QMainWindow):
             return
         source = Path(path_str)
         self._last_import_dir = source.parent
+        breadcrumb(
+            "gui.add_sample: selected", path=str(source), suffix=source.suffix.lower()
+        )
         try:
             batch, _row = create_sample_from_data(self._project_root, breed, source)
         except ValueError as exc:
+            breadcrumb("gui.add_sample: ValueError", error=str(exc))
             QMessageBox.warning(self, "Add Sample", str(exc))
             return
         except (MediaLoadError, OSError) as exc:
+            breadcrumb("gui.add_sample: import error", error=str(exc))
             QMessageBox.warning(self, "Add Sample", f"Import failed: {exc}")
             return
+        breadcrumb("gui.add_sample: create returned, refreshing UI")
         self._set_last_import_breed(breed)
         if self.combo_filter_group.currentText() != breed:
             self.combo_filter_group.setCurrentText(breed)
@@ -4781,6 +4788,7 @@ class MainWindow(QMainWindow):
 
 
 def run_app() -> None:
+    breadcrumb("app start", version=__version__)
     app = QApplication(sys.argv)
     app.setApplicationName("ActinTrackCV")
     app.setApplicationVersion(__version__)

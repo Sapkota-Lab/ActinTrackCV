@@ -14,12 +14,25 @@ data (raw/ processed/ previews/ metadata/ raw_source/ frames/, sample videos);
 those live in the user workspace (~/Documents/ActinTrackCV) at runtime.
 """
 
+import os
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 
 # build_windows.ps1 runs PyInstaller with CWD = repo root.
 REPO_ROOT = Path.cwd()
+
+# Optional console (debug) build: set ACTINTRACKCV_CONSOLE=1 before building to
+# attach a console so Python tracebacks/ffmpeg output are visible when run from
+# PowerShell. The default (unset) stays windowed, with no console window. This
+# is a temporary debugging aid; release builds must leave it unset.
+CONSOLE_BUILD = os.environ.get("ACTINTRACKCV_CONSOLE", "").strip().lower() not in (
+    "",
+    "0",
+    "false",
+    "no",
+    "off",
+)
 
 ENTRY = str(REPO_ROOT / "actintrack_app" / "main.py")
 
@@ -82,7 +95,7 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    console=False,  # windowed: no console window on double-click
+    console=CONSOLE_BUILD,  # windowed by default; ACTINTRACKCV_CONSOLE=1 for debug
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

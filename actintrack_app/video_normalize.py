@@ -16,6 +16,7 @@ from pathlib import Path
 
 import cv2
 
+from actintrack_app.debug_log import breadcrumb
 from actintrack_app.utils import VIDEO_EXTENSIONS
 from actintrack_app.video_processing import MediaLoadError
 
@@ -32,6 +33,7 @@ def video_pixel_dimensions(path: str | Path) -> tuple[int, int]:
     is broken for the file, so this is safe to use on the affected platform.
     """
     path = Path(path)
+    breadcrumb("video_pixel_dimensions: opening", path=str(path))
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
         cap.release()
@@ -43,6 +45,7 @@ def video_pixel_dimensions(path: str | Path) -> tuple[int, int]:
         cap.release()
     if width <= 0 or height <= 0:
         raise MediaLoadError(f"Could not read frame dimensions: {path}")
+    breadcrumb("video_pixel_dimensions: read", width=width, height=height)
     return width, height
 
 
@@ -52,7 +55,9 @@ def needs_even_padding(path: str | Path) -> bool:
     if path.suffix.lower() not in VIDEO_EXTENSIONS:
         return False
     width, height = video_pixel_dimensions(path)
-    return (width % 2 != 0) or (height % 2 != 0)
+    odd = (width % 2 != 0) or (height % 2 != 0)
+    breadcrumb("needs_even_padding", width=width, height=height, odd=odd)
+    return odd
 
 
 def _ffmpeg_exe() -> str:
@@ -74,33 +79,42 @@ def normalize_video_to_even(src: str | Path, dest: str | Path) -> None:
     dest_path = Path(dest)
     dest_path.parent.mkdir(parents=True, exist_ok=True)
 
-    cmd = [
-        _ffmpeg_exe(),
-        "-y",
-        "-i",
-        str(src_path),
-        "-vf",
-        "pad=ceil(iw/2)*2:ceil(ih/2)*2:0:0:color=black",
-        "-c:v",
-        "libx264",
-        "-qp",
-        "0",
-        "-pix_fmt",
-        "yuv420p",
-        "-an",
-        str(dest_path),
-    ]
+    # Resolve the bundled ffmpeg binary inside the guarded block: in a frozen
+    # build imageio_ffmpeg.get_ffmpeg_exe() can raise RuntimeError/ValueError
+    # (binary not found/usable), which must surface as a MediaLoadError the GUI
+    # handles, not an uncaught exception that crashes the app before any write.
     try:
+        ffmpeg = _ffmpeg_exe()
+        breadcrumb("normalize: ffmpeg resolved", exe=ffmpeg)
+        cmd = [
+            ffmpeg,
+            "-y",
+            "-i",
+            str(src_path),
+            "-vf",
+            "pad=ceil(iw/2)*2:ceil(ih/2)*2:0:0:color=black",
+            "-c:v",
+            "libx264",
+            "-qp",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+            "-an",
+            str(dest_path),
+        ]
+        breadcrumb("normalize: ffmpeg subprocess start", src=src_path.name)
         proc = subprocess.run(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
         )
-    except (OSError, ImportError) as exc:
+    except (OSError, RuntimeError, ValueError, ImportError) as exc:
+        breadcrumb("normalize: ffmpeg failed to run", error=str(exc))
         raise MediaLoadError(
             f"Could not normalize video dimensions for {src_path.name}: {exc}"
         ) from exc
+    breadcrumb("normalize: ffmpeg subprocess done", returncode=proc.returncode)
     if proc.returncode != 0 or not dest_path.is_file():
         detail = proc.stderr.decode("utf-8", errors="replace").strip().splitlines()
         tail = detail[-1] if detail else f"ffmpeg exited with {proc.returncode}"
@@ -118,7 +132,11 @@ def store_imported_video(src: str | Path, dest: str | Path) -> None:
     """
     src_path = Path(src)
     dest_path = Path(dest)
+    breadcrumb("store_imported_video: start", src=str(src_path), dest=str(dest_path))
     if needs_even_padding(src_path):
+        breadcrumb("store_imported_video: normalizing (odd dimensions)")
         normalize_video_to_even(src_path, dest_path)
     else:
+        breadcrumb("store_imported_video: copying (even dimensions)")
         shutil.copy2(src_path, dest_path)
+    breadcrumb("store_imported_video: done", exists=dest_path.is_file())

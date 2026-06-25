@@ -14,6 +14,7 @@ from actintrack_app.batch_manager import (
     rename_batch,
     sanitize_batch_name,
 )
+from actintrack_app.debug_log import breadcrumb
 from actintrack_app.export_naming import (
     auto_export_name_for_sample,
     resolve_final_export_name,
@@ -66,14 +67,19 @@ def default_sample_name_from_path(path: Path) -> str:
 def validate_av_mp4_data_file(path: Path) -> tuple[bool, str]:
     """Return (ok, error_message). error_message empty when ok."""
     resolved = Path(path).resolve()
+    breadcrumb("validate: start", path=str(resolved), suffix=resolved.suffix.lower())
     if not resolved.is_file():
         return False, f"File not found: {resolved}"
     kind, _, msg = classify_paths([resolved])
+    breadcrumb("validate: classified", kind=str(kind))
     if kind != ImportKind.VIDEO:
         return False, msg or "Only AVI and MP4 data files are supported."
     try:
+        breadcrumb("validate: probing source frame 0 (OpenCV decode)")
         probe_video_frame_count(resolved)
+        breadcrumb("validate: probe ok")
     except (MediaLoadError, OSError, ValueError) as exc:
+        breadcrumb("validate: probe raised", error=str(exc))
         return False, str(exc)
     return True, ""
 
@@ -274,6 +280,7 @@ def create_sample_from_data(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     root = Path(root).resolve()
     src = Path(source_path).resolve()
+    breadcrumb("create_sample: start", src=str(src))
     ok, err = validate_av_mp4_data_file(src)
     if not ok:
         raise ValueError(err)
@@ -281,6 +288,7 @@ def create_sample_from_data(
     name = default_sample_name_from_path(src)
     num, final_name = allocate_next_batch(root, breed, preferred_name=name)
     batch = create_batch(root, breed, final_name, batch_number=num)
+    breadcrumb("create_sample: batch created, importing", batch=str(final_name))
     try:
         records = import_files(
             [src],
@@ -291,7 +299,8 @@ def create_sample_from_data(
             batch_number=int(batch["batch_number"]),
             notes=notes,
         )
-    except Exception:
+    except Exception as exc:
+        breadcrumb("create_sample: import failed, rolling back", error=str(exc))
         from actintrack_app.batch_manager import delete_empty_batch
 
         try:
@@ -299,6 +308,7 @@ def create_sample_from_data(
         except ValueError:
             pass
         raise
+    breadcrumb("create_sample: success", batch=str(batch["batch_name"]))
 
     mark_batch_auto_generated(
         root, breed, batch["batch_name"], source_filename=src.name

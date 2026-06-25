@@ -188,6 +188,20 @@ class NormalizeFailureTest(unittest.TestCase):
                 with self.assertRaises(video_normalize.MediaLoadError):
                     video_normalize.normalize_video_to_even(src, dest)
 
+    def test_ffmpeg_resolution_error_raises_media_load_error(self) -> None:
+        # imageio_ffmpeg.get_ffmpeg_exe() can raise RuntimeError/ValueError in a
+        # frozen build; that must become MediaLoadError, not an uncaught crash.
+        for exc in (RuntimeError("no ffmpeg exe"), ValueError("bad ffmpeg")):
+            with mock.patch.object(
+                video_normalize, "_ffmpeg_exe", side_effect=exc
+            ):
+                with tempfile.TemporaryDirectory() as tmp:
+                    src = Path(tmp) / "odd.mp4"
+                    src.write_bytes(b"not-a-real-video")
+                    dest = Path(tmp) / "out.mp4"
+                    with self.assertRaises(video_normalize.MediaLoadError):
+                        video_normalize.normalize_video_to_even(src, dest)
+
 
 if __name__ == "__main__":
     unittest.main()
