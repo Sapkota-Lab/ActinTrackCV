@@ -16,7 +16,7 @@ those live in the user workspace (~/Documents/ActinTrackCV) at runtime.
 
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_dynamic_libs
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 
 # build_windows.ps1 runs PyInstaller with CWD = repo root.
 REPO_ROOT = Path.cwd()
@@ -40,6 +40,12 @@ _ico = _ASSET_DIR / "actintrackcv.ico"
 exe_icon = str(_ico) if _ico.is_file() else None
 if _ico.is_file():
     datas.append((str(_ico), "packaging/assets/app"))
+
+# Bundle the standalone ffmpeg binary that imageio-ffmpeg ships, so
+# actintrack_app.video_normalize can pad odd-dimension imports to even at runtime
+# (imageio_ffmpeg.get_ffmpeg_exe() resolves inside the frozen app). This is the
+# fix for odd-height MP4/AVI files decoding to black/garbled frames on Windows.
+datas += collect_data_files("imageio_ffmpeg")
 
 # OpenCV video backends (FFmpeg DLL) are required for AVI/MP4 via cv2.VideoCapture.
 # Pull them explicitly so video loading works on a clean machine. PyQt6, pandas,

@@ -40,6 +40,7 @@ from actintrack_app.utils import (
     STATUS_RAW_IMPORTED,
     relative_to_root,
 )
+from actintrack_app.video_normalize import store_imported_video
 from actintrack_app.video_processing import MediaLoadError
 
 DATA_IMPORT_FILTER = "Data files (*.avi *.mp4);;All files (*)"
@@ -347,7 +348,7 @@ def replace_sample_data(
     old_path = root / old_stored if old_stored else None
     if old_path and old_path.is_file() and old_path.resolve() != dest_path.resolve():
         old_path.unlink(missing_ok=True)
-    shutil.copy2(src, dest_path)
+    store_imported_video(src, dest_path)
 
     samples_path = root / METADATA_DIR / SAMPLES_CSV
     df = load_samples_csv(samples_path)

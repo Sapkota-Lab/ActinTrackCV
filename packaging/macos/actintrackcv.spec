@@ -16,7 +16,7 @@ those live in the user workspace (~/Documents/ActinTrackCV) at runtime.
 
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_dynamic_libs
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 
 # build_macos.sh runs PyInstaller with CWD = repo root.
 REPO_ROOT = Path.cwd()
@@ -39,6 +39,11 @@ datas = [
         "packaging/assets/app",
     ),
 ]
+
+# Bundle the standalone ffmpeg binary that imageio-ffmpeg ships, so
+# actintrack_app.video_normalize can pad odd-dimension imports to even at runtime
+# (imageio_ffmpeg.get_ffmpeg_exe() resolves inside the frozen bundle).
+datas += collect_data_files("imageio_ffmpeg")
 
 # OpenCV video backends (FFmpeg dylib) are required for AVI/MP4 via cv2.VideoCapture.
 # PyQt6, pandas, numpy and tifffile are imported directly and handled by hooks.

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
@@ -36,6 +35,7 @@ from actintrack_app.utils import (
     is_supported_file,
     relative_to_root,
 )
+from actintrack_app.video_normalize import store_imported_video
 
 
 def _utc_now_iso() -> str:
@@ -183,7 +183,7 @@ def import_files(
         sample_id = _next_sample_id(df, group_name)
         dest_name = f"{sample_id}{src_path.suffix.lower()}"
         dest_path = raw_dir / dest_name
-        shutil.copy2(src_path, dest_path)
+        store_imported_video(src_path, dest_path)
 
         record = _build_sample_record(
             sample_id=sample_id,
