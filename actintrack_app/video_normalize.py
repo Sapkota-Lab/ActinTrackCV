@@ -103,11 +103,16 @@ def normalize_video_to_even(src: str | Path, dest: str | Path) -> None:
             str(dest_path),
         ]
         breadcrumb("normalize: ffmpeg subprocess start", src=src_path.name)
+        # On a windowed (no-console) Windows build, launching ffmpeg.exe would
+        # otherwise flash a console window. CREATE_NO_WINDOW suppresses it; the
+        # flag does not exist on macOS/Linux, where 0 is the no-op default.
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         proc = subprocess.run(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
+            creationflags=creationflags,
         )
     except (OSError, RuntimeError, ValueError, ImportError) as exc:
         breadcrumb("normalize: ffmpeg failed to run", error=str(exc))
