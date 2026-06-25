@@ -49,8 +49,12 @@ datas += collect_data_files("imageio_ffmpeg")
 # PyQt6, pandas, numpy and tifffile are imported directly and handled by hooks.
 binaries = collect_dynamic_libs("cv2")
 
-# Add hidden imports here only with evidence from a real macOS build failure.
-hiddenimports = []
+# Add hidden imports here only with evidence from a real build failure.
+# imageio_ffmpeg is imported lazily inside actintrack_app.video_normalize, so
+# PyInstaller's static analysis misses it (collect_data_files above only ships
+# its ffmpeg binary, not the Python code). Kept in sync with the Windows spec,
+# where its absence made odd-dimension imports fail with ModuleNotFoundError.
+hiddenimports = ["imageio_ffmpeg"]
 
 # macOS .app icon needs an .icns (not created yet -> see packaging/RESOURCES.md).
 # Until it exists, the bundle uses the default icon; the runtime QIcon (PNG) still works.

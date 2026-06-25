@@ -66,7 +66,12 @@ datas += collect_data_files("imageio_ffmpeg")
 binaries = collect_dynamic_libs("cv2")
 
 # Add hidden imports here only with evidence from a real Windows build failure.
-hiddenimports = []
+# imageio_ffmpeg is imported lazily inside actintrack_app.video_normalize, so
+# PyInstaller's static analysis misses it and the module is left out of the
+# bundle (collect_data_files above only ships its ffmpeg binary, not the Python
+# code). Without this, odd-dimension imports fail with ModuleNotFoundError when
+# normalizing. Evidence: frozen Windows 0.2.1 import_debug.log.
+hiddenimports = ["imageio_ffmpeg"]
 
 
 a = Analysis(
