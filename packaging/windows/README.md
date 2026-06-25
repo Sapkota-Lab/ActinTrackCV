@@ -3,10 +3,8 @@
 Builds a debuggable one-folder, windowed Windows app for Windows 10/11 x64.
 This is a **one-folder pre-release** (zip), **not** an installer wizard yet.
 
-> **Must run on Windows.** PyInstaller does not cross-compile, so the `.exe`
-> has to be built on a Windows 10/11 x64 machine — it cannot be produced from
-> macOS. The spec/scripts/docs here are kept ready so the Windows build is a
-> turnkey run.
+> **Must run on Windows.** PyInstaller does not cross-compile — the `.exe` must
+> be built on a Windows 10/11 x64 machine.
 
 ## Prerequisites
 
@@ -19,7 +17,7 @@ python -m pip install -r requirements-build.txt
 ```
 
 This installs `requirements.txt` plus `pyinstaller`. The build script verifies
-PyInstaller is present but does not install anything for you.
+PyInstaller is present before running.
 
 ## Build
 
@@ -48,22 +46,22 @@ Zip the **whole** one-folder app (the `.exe` needs the `_internal` folder and
 bundled files next to it — do not zip the `.exe` alone). From the repo root:
 
 ```powershell
-Compress-Archive -Path dist\ActinTrackCV -DestinationPath ActinTrackCV-0.2.0-windows-x64-onefolder.zip -Force
+Compress-Archive -Path dist\ActinTrackCV -DestinationPath ActinTrackCV-0.2.0-windows-x64.zip -Force
 ```
 
 Verify the zip contains a top-level `ActinTrackCV\` folder with `ActinTrackCV.exe`
-and `_internal\` inside it, and no user data / videos / build cache.
+and `_internal\` inside it.
 
 ## End-user instructions (unsigned pre-release)
 
-1. Download `ActinTrackCV-0.2.0-windows-x64-onefolder.zip`.
+1. Download `ActinTrackCV-0.2.0-windows-x64.zip`.
 2. Unzip it.
 3. Open the `ActinTrackCV` folder.
 4. Double-click `ActinTrackCV.exe`.
 5. Keep the whole folder together — do **not** move `ActinTrackCV.exe` out on its own.
 
 Because the build is **unsigned**, Windows SmartScreen may warn on first launch:
-click **More info → Run anyway**. A signed setup wizard is future work.
+click **More info → Run anyway**.
 
 ## What is NOT bundled (by design)
 
@@ -71,8 +69,8 @@ User/project data stays in the workspace at runtime, not in the app:
 `raw/`, `processed/`, `previews/`, `metadata/`, `raw_source/`, `frames/`, sample
 videos. First launch creates/uses `~/Documents/ActinTrackCV`.
 
-## TODO before the installer phase
+## Future work
 
-- Manually validate AVI/MP4 loading on a clean Windows VM without Python.
-- Installer wizard (Inno Setup / NSIS / WiX) — not in this phase.
+- Validate AVI/MP4 loading on a clean Windows machine without Python.
+- Installer wizard (Inno Setup / NSIS / WiX).
 - Code signing certificate to reduce SmartScreen warnings.

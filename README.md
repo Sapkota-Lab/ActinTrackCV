@@ -56,31 +56,29 @@ Requirements: Python 3.10+, OpenCV, NumPy, pandas, PyQt6, tifffile.
 
 ## Run the app
 
-**To run the app, use:** `python run_app.py` from the project root (with your virtual environment activated).
+Run `python run_app.py` from the project root with the virtual environment activated.
 
-**If you are on macOS/Linux, run:**
+On macOS/Linux:
 
 ```bash
 chmod +x run_app.sh    # once
 ./run_app.sh
 ```
 
-**If you are on Windows, run:**
+On Windows:
 
 ```bat
 run_app.bat
 ```
 
-**The main entry point is:** `actintrack_app.main` → `actintrack_app.gui.run_app()`
-
-Equivalent commands:
+The main entry point is `actintrack_app.main` → `actintrack_app.gui.run_app()`. Equivalent:
 
 ```bash
 python run_app.py
 python -m actintrack_app.main
 ```
 
-Launchers activate `.venv` or `venv` automatically when present. If dependencies are missing, `run_app.py` prints install instructions.
+The launchers activate `.venv` or `venv` automatically when present.
 
 ## Terminology
 
@@ -172,7 +170,7 @@ Right-click a Sample or Data row in the left panel:
 
 ## Project layout
 
-Workspace folders are created locally when you use the app and are **not** committed to git:
+The app creates these folders inside your workspace as you work:
 
 ```text
 ActinTrackCV/                    ← project root (workspace)
@@ -210,14 +208,14 @@ python -m unittest discover -s tests -v
 
 ## User documentation
 
-See [`ActinTrackCV_User_Documentation_Refined.md`](ActinTrackCV_User_Documentation_Refined.md) for the full user guide. (Previous `.docx` copies have been removed from the repo.)
+See [`ActinTrackCV_User_Documentation_Refined.md`](ActinTrackCV_User_Documentation_Refined.md) for the full user guide.
 
 ## Build from source
 
-Packaging is **macOS-first**. The frozen app never writes into its own bundle:
+The frozen app never writes into its own bundle:
 
-- **Default workspace:** first launch creates/uses `~/Documents/ActinTrackCV` (not the app install directory). Manually chosen workspaces still load.
-- **External Data is never bundled or deleted:** your AVI/MP4 files and project folders (`raw/`, `processed/`, `previews/`, `metadata/`, `raw_source/`, `frames/`) stay outside the app.
+- The default workspace is `~/Documents/ActinTrackCV`, created on first launch. Manually chosen workspaces still load.
+- External AVI/MP4 files and project folders (`raw/`, `processed/`, `previews/`, `metadata/`, `raw_source/`, `frames/`) are never bundled or deleted.
 
 **Build the macOS `.app` bundle** (debuggable build; not a signed/notarized installer):
 

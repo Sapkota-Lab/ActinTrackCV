@@ -14,7 +14,7 @@ python -m pip install -r requirements-build.txt
 ```
 
 This installs `requirements.txt` plus `pyinstaller`. The build script verifies
-PyInstaller is present but does not install anything for you.
+PyInstaller is present before running.
 
 ## Build
 
@@ -37,7 +37,7 @@ Zip the bundle with `ditto` (preferred over plain `zip`, which can break the
 ditto -c -k --keepParent dist/ActinTrackCV.app ActinTrackCV-0.2.0-macos-arm64.zip
 ```
 
-Upload the zip as a GitHub Release asset. Do not commit `dist/` or the zip.
+Upload the zip as a GitHub Release asset.
 
 ## Open the app
 
@@ -99,10 +99,8 @@ On a Mac that did not build the app (ideally without the dev environment):
 AVI/MP4 loading must be verified in the **frozen** app — codec issues may not
 appear when running from source.
 
-## Future phases (not done here)
+## Future work
 
 - `.dmg` packaging.
-- Code signing + notarization (required for clean distribution to other Macs).
-- `packaging/assets/app/actintrackcv.icns` for the `.app` icon (the spec wires it
-  in automatically once the file exists).
-- universal2 (arm64 + x86_64) builds — current builds are native arch only.
+- Code signing + notarization.
+- universal2 (arm64 + x86_64) builds — current builds are native arm64 only.
