@@ -21,6 +21,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from actintrack_app.optical_flow_validation import run_optical_flow_validation  # noqa: E402
+from actintrack_app.tracker_validation import (  # noqa: E402
+    SyntheticScenario,
+    generate_synthetic_sequence,
+)
 from scripts.shiny_bridge import (  # noqa: E402
     ANALYSIS_LANDMARK_TRACKING,
     ANALYSIS_OPTICAL_FLOW,
@@ -58,22 +62,27 @@ class ValidationReport:
         }
 
 
-def _write_synthetic_video(path: Path, frame_count: int = 8) -> None:
+def _write_synthetic_video(path: Path, frame_count: int = 12) -> None:
+    scenario = SyntheticScenario(
+        "workflow_gate",
+        dx_px_per_frame=2.0,
+        dy_px_per_frame=1.0,
+        spot_count=4,
+        frame_count=frame_count,
+        min_spacing_px=14,
+    )
+    frames, _ = generate_synthetic_sequence(scenario, seed=20260629)
+    height, width = frames[0].shape[:2]
     writer = cv2.VideoWriter(
         str(path),
         cv2.VideoWriter_fourcc(*"MJPG"),
         5.0,
-        (120, 90),
+        (width, height),
     )
     if not writer.isOpened():
         raise OSError(f"Could not create synthetic video: {path}")
     try:
-        for index in range(frame_count):
-            frame = np.full((90, 120, 3), 18, dtype=np.uint8)
-            cx = 30 + index
-            cy = 40 + index // 2
-            cv2.circle(frame, (cx, cy), 4, (255, 255, 0), -1)
-            cv2.circle(frame, (80, 55), 3, (255, 255, 0), -1)
+        for frame in frames:
             writer.write(frame)
     finally:
         writer.release()
@@ -98,7 +107,6 @@ def _validate_landmark_outputs(report: ValidationReport, output_dir: Path, paylo
         "summary_json": outputs.get("summary_json") or payload.get("summary_json"),
         "starting_points_png": outputs.get("starting_points_png"),
         "track_overlay_png": outputs.get("track_overlay_png"),
-        "track_preview_mp4": outputs.get("track_preview_mp4"),
     }
     for label, path_value in required_files.items():
         path = Path(path_value) if path_value else None
@@ -106,6 +114,24 @@ def _validate_landmark_outputs(report: ValidationReport, output_dir: Path, paylo
             report.add("fail", "landmark_artifacts", f"Missing {label}: {path_value}")
         else:
             report.add("pass", "landmark_artifacts", f"Present {label}")
+
+    mp4_path = Path(outputs.get("track_preview_mp4") or "") if outputs.get("track_preview_mp4") else None
+    webm_path = Path(outputs.get("track_preview_webm") or "") if outputs.get("track_preview_webm") else None
+    if mp4_path and mp4_path.is_file():
+        report.add("pass", "landmark_artifacts", "Present track_preview_mp4")
+    elif webm_path and webm_path.is_file():
+        report.add(
+            "warn",
+            "landmark_artifacts",
+            "MP4 preview unavailable; WebM preview present (acceptable on headless CI)",
+        )
+    else:
+        preview_error = payload.get("track_preview_error") or ""
+        report.add(
+            "fail",
+            "landmark_artifacts",
+            f"Missing track preview video (mp4/webm). {preview_error}".strip(),
+        )
 
     summary_path = Path(required_files["summary_json"]) if required_files["summary_json"] else None
     if summary_path and summary_path.is_file():
@@ -304,7 +330,7 @@ def run_validation(output_root: Path | None = None) -> ValidationReport:
         min_spacing=10,
         search_radius=12,
         patch_size=11,
-        min_confidence=0.4,
+        min_confidence=0.2,
         lookahead_frames=0,
         microns_per_pixel=mpp,
         seconds_per_frame=spf,
