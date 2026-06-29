@@ -284,7 +284,12 @@ class MotionIndexTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             mp4 = Path(tmp) / "preview.mp4"
             webm = Path(tmp) / "preview.webm"
-            mp4_codec = write_track_preview_video(mp4, frames, tracks)
+            try:
+                mp4_codec = write_track_preview_video(mp4, frames, tracks)
+            except OSError as exc:
+                if "unavailable" in str(exc).lower():
+                    self.skipTest(f"H.264 encoder unavailable: {exc}")
+                raise
             webm_codec = write_track_preview_webm(webm, frames, tracks)
 
             self.assertIn(mp4_codec, {"avc1", "H264"})

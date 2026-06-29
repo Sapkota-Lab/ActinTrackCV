@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from actintrack_app.gui import METRIC_DEBOUNCE_MS
+from actintrack_app.utils import METRIC_DEBOUNCE_MS
 from actintrack_app.optical_flow_motion_index import OpticalFlowSettings
 from actintrack_app.optical_flow_overlay import OpticalFlowVisualizationSettings
 from actintrack_app.roi_workflow import process_batch_approved_rois

@@ -165,6 +165,7 @@ from actintrack_app.utils import (
     GROUPS,
     GROUP_PREFIX,
     METADATA_DIR,
+    METRIC_DEBOUNCE_MS,
     RAW_DIR,
     SAMPLES_CSV,
     STATUS_IMPORTED,
@@ -205,7 +206,6 @@ def _app_qicon() -> Optional[QIcon]:
     return None
 AUTO_APPLY_ROI_CONFIDENCE = 0.15
 DRAFT_TRACKING_DIR = "draft_tracking"
-METRIC_DEBOUNCE_MS = 2500
 _METRIC_ANALYSIS_VIEW_LABEL = "Metric Analysis View"
 
 _ADVANCED_SAMPLE_STATUSES = frozenset(
