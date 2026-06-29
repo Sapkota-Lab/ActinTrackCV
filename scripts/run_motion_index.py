@@ -11,7 +11,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from actintrack_app.motion_index import MotionIndexParams, run_motion_index_test
+from actintrack_app.motion_index import (
+    MotionIndexParams,
+    TRACKING_METHOD_BRIGHTEST_LOCAL,
+    TRACKING_METHOD_TEMPLATE,
+    run_motion_index_test,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -43,9 +48,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--search-radius", type=int, default=8)
     parser.add_argument("--patch-size", type=int, default=11)
     parser.add_argument("--min-confidence", type=float, default=0.55)
-    parser.add_argument("--lookahead-frames", type=int, default=1)
+    parser.add_argument("--lookahead-frames", type=int, default=0)
     parser.add_argument("--microns-per-pixel", type=float, default=0.265)
-    parser.add_argument("--seconds-per-frame", type=float, default=0.2)
+    parser.add_argument("--seconds-per-frame", type=float, default=30.0)
+    parser.add_argument(
+        "--tracking-method",
+        choices=[TRACKING_METHOD_BRIGHTEST_LOCAL, TRACKING_METHOD_TEMPLATE],
+        default=TRACKING_METHOD_BRIGHTEST_LOCAL,
+        help="Local matching method used to follow each starting point.",
+    )
     return parser
 
 
@@ -60,6 +71,7 @@ def main() -> None:
         lookahead_frames=args.lookahead_frames,
         microns_per_pixel=args.microns_per_pixel,
         seconds_per_frame=args.seconds_per_frame,
+        tracking_method=args.tracking_method,
     )
     source = args.source.resolve()
     out_dir = args.output_dir or (source.parent if source.is_file() else source)

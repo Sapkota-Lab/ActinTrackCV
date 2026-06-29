@@ -42,8 +42,12 @@ MOTION_INDEX_SUMMARY_COLUMNS = [
     "final_export_name",
     "source_path",
     "analysis_timestamp_utc",
-    "downward_velocity_index_um_per_s",
+    "absolute_velocity_index_um_per_s",
     "general_movement_index_um_per_s",
+    "downward_velocity_index_um_per_s",
+    "time_weighted_mean_speed_um_per_s",
+    "signed_vertical_velocity_um_per_s",
+    "downward_velocity_contribution_um_per_s",
     "num_tracks_started",
     "num_tracks_with_valid_steps",
     "total_valid_steps",
@@ -55,22 +59,26 @@ MOTION_INDEX_SUMMARY_COLUMNS = [
 ]
 
 DEFAULT_MICRONS_PER_PIXEL = 0.2650
-DEFAULT_SECONDS_PER_FRAME = 0.2000
+DEFAULT_SECONDS_PER_FRAME = 30.0000
+TRACKING_METHOD_BRIGHTEST_LOCAL = "brightest_local"
+TRACKING_METHOD_TEMPLATE = "template"
+TRACKING_METHODS = {TRACKING_METHOD_BRIGHTEST_LOCAL, TRACKING_METHOD_TEMPLATE}
 
 
 @dataclass(frozen=True)
 class MotionIndexParams:
-    """Parameters for bright-spot template-matching motion-index analysis."""
+    """Parameters for bright-point motion-index analysis."""
 
-    num_starting_points: int = 5
-    min_point_spacing_px: int = 40
-    search_radius_px: int = 15
+    num_starting_points: int = 10
+    min_point_spacing_px: int = 20
+    search_radius_px: int = 8
     template_patch_size_px: int = 11
-    min_template_confidence: float = 0.70
-    lookahead_frames: int = 3
+    min_template_confidence: float = 0.55
+    lookahead_frames: int = 0
     microns_per_pixel: float = DEFAULT_MICRONS_PER_PIXEL
     seconds_per_frame: float = DEFAULT_SECONDS_PER_FRAME
     downward_direction: str = "increasing_y"
+    tracking_method: str = TRACKING_METHOD_BRIGHTEST_LOCAL
 
     def __post_init__(self) -> None:
         if self.num_starting_points < 1:
@@ -92,6 +100,9 @@ class MotionIndexParams:
             raise ValueError("seconds_per_frame must be positive.")
         if self.downward_direction != "increasing_y":
             raise ValueError("Only downward_direction='increasing_y' is supported.")
+        if self.tracking_method not in TRACKING_METHODS:
+            supported = ", ".join(sorted(TRACKING_METHODS))
+            raise ValueError(f"tracking_method must be one of: {supported}.")
 
 
 @dataclass
@@ -115,6 +126,19 @@ class PointTrack:
 
     def last_point(self) -> TrackPoint:
         return self.points[-1]
+
+
+@dataclass(frozen=True)
+class VelocitySummary:
+    """Explicit aggregate velocity definitions across all valid track steps."""
+
+    mean_step_speed_um_per_s: float
+    conditional_positive_downward_speed_um_per_s: float
+    time_weighted_mean_speed_um_per_s: float
+    signed_vertical_velocity_um_per_s: float
+    downward_velocity_contribution_um_per_s: float
+    total_tracked_time_s: float
+    valid_step_count: int
 
 
 @dataclass(frozen=True)
@@ -144,6 +168,12 @@ class MotionIndexResult:
     downward_velocity_index_um_per_s: float
     general_movement_index_um_per_s: float
     track_summaries: list[dict[str, Any]]
+    track_preview_webm: str = ""
+    track_preview_mp4_codec: str = ""
+    track_preview_webm_codec: str = ""
+    time_weighted_mean_speed_um_per_s: float = 0.0
+    signed_vertical_velocity_um_per_s: float = 0.0
+    downward_velocity_contribution_um_per_s: float = 0.0
     final_export_name: str = ""
     sample_id: str = ""
     num_tracks_with_valid_steps: int = 0
@@ -162,7 +192,19 @@ class MotionIndexResult:
             "frame_height": self.frame_height,
             "analysis_timestamp_utc": datetime.now(timezone.utc).isoformat(),
             "parameters": asdict(self.params),
+            "primary_velocity_metric": "absolute_velocity_index_um_per_s",
+            "recommended_scalar_speed_metric": "time_weighted_mean_speed_um_per_s",
+            "primary_velocity_index_um_per_s": self.general_movement_index_um_per_s,
+            "absolute_velocity_index_um_per_s": self.general_movement_index_um_per_s,
             "downward_velocity_index_um_per_s": self.downward_velocity_index_um_per_s,
+            "downward_velocity_index_definition": (
+                "mean(dy/dt | dy > 0); increasing image y is downward"
+            ),
+            "time_weighted_mean_speed_um_per_s": self.time_weighted_mean_speed_um_per_s,
+            "signed_vertical_velocity_um_per_s": self.signed_vertical_velocity_um_per_s,
+            "downward_velocity_contribution_um_per_s": (
+                self.downward_velocity_contribution_um_per_s
+            ),
             "general_movement_index_um_per_s": self.general_movement_index_um_per_s,
             "num_tracks_started": len(self.tracks),
             "num_tracks_with_valid_steps": self.num_tracks_with_valid_steps,
@@ -181,6 +223,9 @@ class MotionIndexResult:
                 "starting_points_png": self.start_points_preview,
                 "track_overlay_png": self.tracks_overlay_preview,
                 "track_preview_mp4": self.track_preview_video,
+                "track_preview_webm": self.track_preview_webm,
+                "track_preview_mp4_codec": self.track_preview_mp4_codec,
+                "track_preview_webm_codec": self.track_preview_webm_codec,
             },
         }
 
@@ -408,6 +453,127 @@ def _local_maxima_mask(signal: np.ndarray, patch_size: int) -> np.ndarray:
     return signal >= (dilated - 1e-6)
 
 
+def _signal_confidence(signal: np.ndarray, peak_value: float) -> float:
+    low = float(np.percentile(signal, 5))
+    high = float(np.percentile(signal, 99.5))
+    denom = max(high - low, 1e-6)
+    return float(np.clip((float(peak_value) - low) / denom, 0.0, 1.0))
+
+
+def _bright_region_centroid(
+    signal: np.ndarray,
+    peak_x: float,
+    peak_y: float,
+    *,
+    radius_px: int,
+) -> tuple[float, float]:
+    """Return a weighted centroid for the bright connected region around a peak."""
+    h, w = signal.shape[:2]
+    cx = int(round(peak_x))
+    cy = int(round(peak_y))
+    radius = max(1, int(radius_px))
+    x0 = max(0, cx - radius)
+    y0 = max(0, cy - radius)
+    x1 = min(w, cx + radius + 1)
+    y1 = min(h, cy + radius + 1)
+    region = signal[y0:y1, x0:x1]
+    if region.size == 0:
+        return float(peak_x), float(peak_y)
+
+    local_x = cx - x0
+    local_y = cy - y0
+    peak_value = float(region[local_y, local_x])
+    floor = float(np.percentile(region, 20))
+    threshold = floor + (0.65 * max(0.0, peak_value - floor))
+    bright = (region >= threshold).astype(np.uint8)
+    if not np.any(bright):
+        return float(peak_x), float(peak_y)
+
+    labels_count, labels = cv2.connectedComponents(bright, connectivity=8)
+    if labels_count <= 1:
+        return float(peak_x), float(peak_y)
+    peak_label = int(labels[local_y, local_x])
+    if peak_label <= 0:
+        return float(peak_x), float(peak_y)
+
+    mask = labels == peak_label
+    ys, xs = np.where(mask)
+    if ys.size == 0:
+        return float(peak_x), float(peak_y)
+
+    weights = np.clip(region[ys, xs] - floor, 0.0, None).astype(np.float64)
+    if float(np.sum(weights)) <= 1e-9:
+        return float(x0 + np.mean(xs)), float(y0 + np.mean(ys))
+    return (
+        float(np.sum((x0 + xs) * weights) / np.sum(weights)),
+        float(np.sum((y0 + ys) * weights) / np.sum(weights)),
+    )
+
+
+def _too_close_to_blocked(
+    x: float,
+    y: float,
+    blocked_points: Sequence[tuple[float, float]],
+    min_distance_px: float,
+) -> bool:
+    if not blocked_points or min_distance_px <= 0:
+        return False
+    min_dist_sq = float(min_distance_px) * float(min_distance_px)
+    for bx, by in blocked_points:
+        dx = float(x) - float(bx)
+        dy = float(y) - float(by)
+        if (dx * dx) + (dy * dy) < min_dist_sq:
+            return True
+    return False
+
+
+def _starting_point_valid_mask(signal: np.ndarray) -> np.ndarray:
+    """
+    Mask pixels where starting points are allowed.
+
+    Large dark voids (nucleus / H2B) and their immediate perinuclear bright ring
+    are excluded so seed points land on actin cables instead of circling the nucleus.
+    """
+    h, w = signal.shape[:2]
+    valid = np.ones((h, w), dtype=bool)
+    if h < 8 or w < 8:
+        return valid
+
+    low = float(np.percentile(signal, 12))
+    dark = (signal <= low).astype(np.uint8)
+    if not np.any(dark):
+        return valid
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    dark = cv2.morphologyEx(dark, cv2.MORPH_CLOSE, kernel)
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(dark, connectivity=8)
+    min_void_area = max(64, int(0.004 * h * w))
+    excluded = np.zeros((h, w), dtype=np.uint8)
+    for label in range(1, num_labels):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area < min_void_area:
+            continue
+        component = labels == label
+        touches_border = (
+            np.any(component[0, :])
+            or np.any(component[-1, :])
+            or np.any(component[:, 0])
+            or np.any(component[:, -1])
+        )
+        if touches_border:
+            continue
+        radius = max(4.0, (area / 3.14159265) ** 0.5)
+        margin = int(max(6, min(35, radius * 0.45)))
+        component_u8 = component.astype(np.uint8)
+        dilate_kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (2 * margin + 1, 2 * margin + 1),
+        )
+        excluded = np.maximum(excluded, cv2.dilate(component_u8, dilate_kernel))
+    valid &= excluded == 0
+    return valid
+
+
 def select_starting_points(
     first_frame: np.ndarray,
     params: MotionIndexParams,
@@ -421,6 +587,7 @@ def select_starting_points(
     h, w = signal.shape[:2]
     patch = _odd_size(max(3, params.template_patch_size_px))
     half = patch // 2
+    valid_mask = _starting_point_valid_mask(signal)
 
     mask = _local_maxima_mask(signal, patch_size=5)
     ys, xs = np.where(mask)
@@ -437,6 +604,18 @@ def select_starting_points(
     for idx in order:
         x = float(xs[idx])
         y = float(ys[idx])
+        x, y = _bright_region_centroid(
+            signal,
+            x,
+            y,
+            radius_px=max(2, half),
+        )
+        cx_i = int(round(x))
+        cy_i = int(round(y))
+        if cx_i < 0 or cy_i < 0 or cx_i >= w or cy_i >= h:
+            continue
+        if not valid_mask[cy_i, cx_i]:
+            continue
         if x < half or y < half or x >= w - half or y >= h - half:
             continue
         too_close = False
@@ -477,6 +656,9 @@ def _match_template_in_window(
     center_x: float,
     center_y: float,
     search_radius_px: int,
+    *,
+    blocked_points: Sequence[tuple[float, float]] = (),
+    blocked_radius_px: float = 0.0,
 ) -> tuple[float, float, float]:
     h, w = frame_signal.shape[:2]
     patch_h, patch_w = template.shape[:2]
@@ -497,31 +679,120 @@ def _match_template_in_window(
         return center_x, center_y, -1.0
 
     result = cv2.matchTemplate(search_region, template, cv2.TM_CCOEFF_NORMED)
-    _, max_val, _, max_loc = cv2.minMaxLoc(result)
-    match_x = float(x0 + max_loc[0] + half_x)
-    match_y = float(y0 + max_loc[1] + half_y)
-    return match_x, match_y, float(max_val)
+    order = np.argsort(result.ravel())[::-1]
+    for flat_idx in order:
+        y_loc, x_loc = np.unravel_index(int(flat_idx), result.shape)
+        match_x = float(x0 + x_loc + half_x)
+        match_y = float(y0 + y_loc + half_y)
+        refined_x, refined_y = _bright_region_centroid(
+            frame_signal,
+            match_x,
+            match_y,
+            radius_px=max(2, min(half_x, half_y)),
+        )
+        if _too_close_to_blocked(
+            refined_x,
+            refined_y,
+            blocked_points,
+            blocked_radius_px,
+        ):
+            continue
+        return refined_x, refined_y, float(result[y_loc, x_loc])
+    return center_x, center_y, -1.0
+
+
+def _brightest_point_in_window(
+    frame_signal: np.ndarray,
+    center_x: float,
+    center_y: float,
+    search_radius_px: int,
+    *,
+    centroid_radius_px: int,
+    blocked_points: Sequence[tuple[float, float]] = (),
+    blocked_radius_px: float = 0.0,
+) -> tuple[float, float, float]:
+    h, w = frame_signal.shape[:2]
+    cx = int(round(center_x))
+    cy = int(round(center_y))
+    radius = int(search_radius_px)
+    x0 = max(0, cx - radius)
+    y0 = max(0, cy - radius)
+    x1 = min(w, cx + radius + 1)
+    y1 = min(h, cy + radius + 1)
+    region = frame_signal[y0:y1, x0:x1]
+    if region.size == 0:
+        return center_x, center_y, -1.0
+
+    mask = _local_maxima_mask(region, patch_size=3)
+    ys, xs = np.where(mask)
+    if ys.size == 0:
+        flat = int(np.argmax(region))
+        y_max, x_max = np.unravel_index(flat, region.shape)
+        ys = np.array([y_max])
+        xs = np.array([x_max])
+
+    scores = region[ys, xs]
+    order = np.argsort(scores)[::-1]
+    max_radius_sq = float(radius + 1) * float(radius + 1)
+    for idx in order:
+        raw_x = float(x0 + xs[idx])
+        raw_y = float(y0 + ys[idx])
+        x, y = _bright_region_centroid(
+            frame_signal,
+            raw_x,
+            raw_y,
+            radius_px=centroid_radius_px,
+        )
+        dx = x - float(center_x)
+        dy = y - float(center_y)
+        if (dx * dx) + (dy * dy) > max_radius_sq:
+            continue
+        if _too_close_to_blocked(x, y, blocked_points, blocked_radius_px):
+            continue
+        confidence = _signal_confidence(frame_signal, float(scores[idx]))
+        return x, y, confidence
+    return center_x, center_y, -1.0
 
 
 def _try_match_step(
     signals: Sequence[np.ndarray],
     prev_point: TrackPoint,
     target_frame_idx: int,
-    patch_size: int,
+    params: MotionIndexParams,
+    *,
     search_radius_px: int,
+    blocked_points: Sequence[tuple[float, float]] = (),
+    blocked_radius_px: float = 0.0,
 ) -> tuple[float, float, float]:
-    template = _extract_patch(
-        signals[prev_point.frame_index],
-        prev_point.x,
-        prev_point.y,
-        patch_size,
-    )
+    patch_size = _odd_size(params.template_patch_size_px)
+    if params.tracking_method == TRACKING_METHOD_BRIGHTEST_LOCAL:
+        return _brightest_point_in_window(
+            signals[target_frame_idx],
+            prev_point.x,
+            prev_point.y,
+            search_radius_px,
+            centroid_radius_px=max(2, patch_size // 2),
+            blocked_points=blocked_points,
+            blocked_radius_px=blocked_radius_px,
+        )
+
+    try:
+        template = _extract_patch(
+            signals[prev_point.frame_index],
+            prev_point.x,
+            prev_point.y,
+            patch_size,
+        )
+    except ValueError:
+        return prev_point.x, prev_point.y, -1.0
     return _match_template_in_window(
         signals[target_frame_idx],
         template,
         prev_point.x,
         prev_point.y,
         search_radius_px,
+        blocked_points=blocked_points,
+        blocked_radius_px=blocked_radius_px,
     )
 
 
@@ -530,12 +801,13 @@ def track_points(
     starting_points: Sequence[tuple[float, float]],
     params: MotionIndexParams,
 ) -> list[PointTrack]:
-    """Track starting bright points across frames using local template matching."""
+    """Track starting bright points across frames using the configured local matcher."""
     if len(frames) < 2:
         raise ValueError("At least two frames are required for tracking.")
 
-    patch_size = _odd_size(params.template_patch_size_px)
     signals = [frame_to_signal(frame) for frame in frames]
+    claims_by_frame: dict[int, list[tuple[float, float]]] = {}
+    blocked_radius = max(2.0, min(10.0, float(params.min_point_spacing_px) * 0.5))
 
     tracks: list[PointTrack] = []
     for track_id, (sx, sy) in enumerate(starting_points):
@@ -556,21 +828,52 @@ def track_points(
             )
         )
 
-    for track in tracks:
-        while track.active:
+    for next_frame in range(1, len(frames)):
+        frame_claims = claims_by_frame.setdefault(next_frame, [])
+        for track in tracks:
+            if not track.active:
+                continue
             prev_point = track.last_point()
-            next_frame = prev_point.frame_index + 1
-            if next_frame >= len(frames):
+            if prev_point.frame_index >= next_frame:
+                continue
+
+            if prev_point.frame_index < next_frame - 1:
+                frame_gap = next_frame - prev_point.frame_index
+                if params.lookahead_frames > 0 and frame_gap <= params.lookahead_frames + 1:
+                    match_x, match_y, confidence = _try_match_step(
+                        signals,
+                        prev_point,
+                        next_frame,
+                        params,
+                        search_radius_px=params.search_radius_px * frame_gap,
+                        blocked_points=frame_claims,
+                        blocked_radius_px=blocked_radius,
+                    )
+                    if confidence >= params.min_template_confidence:
+                        track.points.append(
+                            TrackPoint(
+                                track_id=track.track_id,
+                                frame_index=next_frame,
+                                x=match_x,
+                                y=match_y,
+                                confidence=confidence,
+                                recovered_with_lookahead=True,
+                            )
+                        )
+                        frame_claims.append((match_x, match_y))
+                        continue
                 track.active = False
-                track.end_reason = "reached_last_frame"
-                break
+                track.end_reason = f"lost_before_frame_{next_frame}"
+                continue
 
             match_x, match_y, confidence = _try_match_step(
                 signals,
                 prev_point,
                 next_frame,
-                patch_size,
-                params.search_radius_px,
+                params,
+                search_radius_px=params.search_radius_px,
+                blocked_points=frame_claims,
+                blocked_radius_px=blocked_radius,
             )
 
             if confidence >= params.min_template_confidence:
@@ -583,37 +886,16 @@ def track_points(
                         confidence=confidence,
                     )
                 )
-                continue
-
-            recovered = False
-            if params.lookahead_frames > 0:
-                lookahead_frame = next_frame + params.lookahead_frames
-                if lookahead_frame < len(frames):
-                    match_x, match_y, confidence = _try_match_step(
-                        signals,
-                        prev_point,
-                        lookahead_frame,
-                        patch_size,
-                        params.search_radius_px,
-                    )
-                    if confidence >= params.min_template_confidence:
-                        track.points.append(
-                            TrackPoint(
-                                track_id=track.track_id,
-                                frame_index=lookahead_frame,
-                                x=match_x,
-                                y=match_y,
-                                confidence=confidence,
-                                recovered_with_lookahead=True,
-                            )
-                        )
-                        recovered = True
-
-            if recovered:
+                frame_claims.append((match_x, match_y))
                 continue
 
             track.active = False
             track.end_reason = f"lost_at_frame_{next_frame}"
+
+    for track in tracks:
+        if track.active:
+            track.active = False
+            track.end_reason = "reached_last_frame"
 
     return tracks
 
@@ -623,6 +905,66 @@ def _iter_consecutive_points(track: PointTrack) -> list[tuple[TrackPoint, TrackP
     for i in range(1, len(track.points)):
         pairs.append((track.points[i - 1], track.points[i]))
     return pairs
+
+
+def _point_step_metrics(
+    prev_pt: TrackPoint | None,
+    point: TrackPoint,
+    params: MotionIndexParams,
+    previous_motion_angle_deg: float | None = None,
+) -> dict[str, Any]:
+    if prev_pt is None:
+        return {
+            "prev_frame_index": "",
+            "frame_gap": "",
+            "dx_px": "",
+            "dy_px": "",
+            "displacement_px": "",
+            "dt_s": "",
+            "dx_um": "",
+            "dy_um": "",
+            "displacement_um": "",
+            "absolute_velocity_um_per_s": "",
+            "downward_velocity_um_per_s": "",
+            "motion_angle_deg": "",
+            "turning_angle_deg": "",
+        }
+
+    frame_gap = max(1, point.frame_index - prev_pt.frame_index)
+    dt_s = float(params.seconds_per_frame) * frame_gap
+    dx_px = point.x - prev_pt.x
+    dy_px = point.y - prev_pt.y
+    displacement_px = float(np.hypot(dx_px, dy_px))
+    dx_um = dx_px * float(params.microns_per_pixel)
+    dy_um = dy_px * float(params.microns_per_pixel)
+    displacement_um = float(np.hypot(dx_um, dy_um))
+    absolute_velocity = displacement_um / dt_s
+    downward_velocity = (dy_um / dt_s) if dy_px > 0 else 0.0
+    motion_angle_deg = float(np.degrees(np.arctan2(dy_px, dx_px)))
+    turning_angle_deg: float | str = ""
+    if previous_motion_angle_deg is not None:
+        turning_angle_deg = (
+            (motion_angle_deg - previous_motion_angle_deg + 180.0) % 360.0
+        ) - 180.0
+    return {
+        "prev_frame_index": prev_pt.frame_index,
+        "frame_gap": frame_gap,
+        "dx_px": round(dx_px, 6),
+        "dy_px": round(dy_px, 6),
+        "displacement_px": round(displacement_px, 6),
+        "dt_s": round(dt_s, 6),
+        "dx_um": round(dx_um, 6),
+        "dy_um": round(dy_um, 6),
+        "displacement_um": round(displacement_um, 6),
+        "absolute_velocity_um_per_s": round(absolute_velocity, 6),
+        "downward_velocity_um_per_s": round(downward_velocity, 6),
+        "motion_angle_deg": round(motion_angle_deg, 6),
+        "turning_angle_deg": (
+            round(turning_angle_deg, 6)
+            if isinstance(turning_angle_deg, float)
+            else turning_angle_deg
+        ),
+    }
 
 
 def compute_motion_indices(
@@ -635,7 +977,7 @@ def compute_motion_indices(
     Downward Velocity Index:
         Mean positive downward speed (dy > 0, increasing y) in microns/s.
 
-    General Movement Index:
+    General Movement / Absolute Velocity Index:
         Mean Euclidean displacement speed in microns/s across all valid steps.
     """
     mpp = float(params.microns_per_pixel)
@@ -699,6 +1041,62 @@ def compute_motion_indices(
     return downward_index, general_index, track_summaries
 
 
+def compute_velocity_summary(
+    tracks: Sequence[PointTrack],
+    params: MotionIndexParams,
+) -> VelocitySummary:
+    """
+    Compute velocity aggregates with explicit denominators and direction semantics.
+
+    The historical indices are step-weighted means. The additional metrics below
+    are time-weighted, which is important when lookahead creates unequal frame gaps.
+    Positive image y is defined as downward.
+    """
+    mpp = float(params.microns_per_pixel)
+    seconds_per_frame = float(params.seconds_per_frame)
+    step_speeds: list[float] = []
+    positive_downward_step_speeds: list[float] = []
+    total_path_um = 0.0
+    total_vertical_um = 0.0
+    total_downward_um = 0.0
+    total_time_s = 0.0
+
+    for track in tracks:
+        for prev_pt, next_pt in _iter_consecutive_points(track):
+            frame_gap = max(1, next_pt.frame_index - prev_pt.frame_index)
+            step_time_s = seconds_per_frame * frame_gap
+            dx_um = (next_pt.x - prev_pt.x) * mpp
+            dy_um = (next_pt.y - prev_pt.y) * mpp
+            displacement_um = float(np.hypot(dx_um, dy_um))
+
+            step_speeds.append(displacement_um / step_time_s)
+            if dy_um > 0:
+                positive_downward_step_speeds.append(dy_um / step_time_s)
+            total_path_um += displacement_um
+            total_vertical_um += dy_um
+            total_downward_um += max(dy_um, 0.0)
+            total_time_s += step_time_s
+
+    if total_time_s <= 0:
+        return VelocitySummary(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0)
+
+    return VelocitySummary(
+        mean_step_speed_um_per_s=(
+            float(np.mean(step_speeds)) if step_speeds else 0.0
+        ),
+        conditional_positive_downward_speed_um_per_s=(
+            float(np.mean(positive_downward_step_speeds))
+            if positive_downward_step_speeds
+            else 0.0
+        ),
+        time_weighted_mean_speed_um_per_s=total_path_um / total_time_s,
+        signed_vertical_velocity_um_per_s=total_vertical_um / total_time_s,
+        downward_velocity_contribution_um_per_s=total_downward_um / total_time_s,
+        total_tracked_time_s=total_time_s,
+        valid_step_count=len(step_speeds),
+    )
+
+
 def compute_track_statistics(tracks: Sequence[PointTrack]) -> tuple[int, int, float]:
     """Return (tracks_with_valid_steps, total_valid_steps, mean_track_length_frames)."""
     valid_lengths: list[int] = []
@@ -720,7 +1118,11 @@ def _default_output_dir(source: Path, final_export_name: str | None = None) -> P
     return source.parent
 
 
-def save_trajectory_csv(path: Path, tracks: Sequence[PointTrack]) -> None:
+def save_trajectory_csv(
+    path: Path,
+    tracks: Sequence[PointTrack],
+    params: MotionIndexParams,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(
@@ -728,25 +1130,51 @@ def save_trajectory_csv(path: Path, tracks: Sequence[PointTrack]) -> None:
             fieldnames=[
                 "track_id",
                 "frame_index",
+                "prev_frame_index",
+                "frame_gap",
                 "x_px",
                 "y_px",
+                "dx_px",
+                "dy_px",
+                "displacement_px",
+                "dt_s",
+                "dx_um",
+                "dy_um",
+                "displacement_um",
+                "absolute_velocity_um_per_s",
+                "downward_velocity_um_per_s",
+                "motion_angle_deg",
+                "turning_angle_deg",
                 "confidence",
                 "recovered_with_lookahead",
             ],
         )
         writer.writeheader()
         for track in tracks:
+            prev_point: TrackPoint | None = None
+            previous_motion_angle_deg: float | None = None
             for point in track.points:
-                writer.writerow(
-                    {
-                        "track_id": point.track_id,
-                        "frame_index": point.frame_index,
-                        "x_px": round(point.x, 3),
-                        "y_px": round(point.y, 3),
-                        "confidence": round(point.confidence, 4),
-                        "recovered_with_lookahead": point.recovered_with_lookahead,
-                    }
+                row = {
+                    "track_id": point.track_id,
+                    "frame_index": point.frame_index,
+                    "x_px": round(point.x, 3),
+                    "y_px": round(point.y, 3),
+                    "confidence": round(point.confidence, 4),
+                    "recovered_with_lookahead": point.recovered_with_lookahead,
+                }
+                row.update(
+                    _point_step_metrics(
+                        prev_point,
+                        point,
+                        params,
+                        previous_motion_angle_deg,
+                    )
                 )
+                writer.writerow(row)
+                motion_angle = row.get("motion_angle_deg", "")
+                if motion_angle != "":
+                    previous_motion_angle_deg = float(motion_angle)
+                prev_point = point
 
 
 def draw_start_points_preview(
@@ -823,26 +1251,114 @@ def write_track_preview_video(
     tracks: Sequence[PointTrack],
     *,
     fps: float = 5.0,
-) -> None:
-    """Write watchable trajectory preview MP4 from processed ROI frames."""
+) -> str:
+    """Write an H.264 trajectory preview MP4 and return the codec tag used."""
     if not frames:
         raise ValueError("Cannot write track preview: no frames.")
     path.parent.mkdir(parents=True, exist_ok=True)
     h, w = frames[0].shape[:2]
-    writer = cv2.VideoWriter(
-        str(path),
-        cv2.VideoWriter_fourcc(*"mp4v"),
-        max(1.0, float(fps)),
-        (w, h),
+    rendered = [
+        render_track_preview_frame(frame, tracks, frame_index)
+        for frame_index, frame in enumerate(frames)
+    ]
+    return _write_browser_video(path, rendered, fps=fps, codecs=("avc1", "H264"))
+
+
+def write_track_preview_webm(
+    path: Path,
+    frames: Sequence[np.ndarray],
+    tracks: Sequence[PointTrack],
+    *,
+    fps: float = 5.0,
+) -> str:
+    """Write a VP9/VP8 WebM trajectory preview and return the codec tag used."""
+    if not frames:
+        raise ValueError("Cannot write track preview: no frames.")
+    rendered = [
+        render_track_preview_frame(frame, tracks, frame_index)
+        for frame_index, frame in enumerate(frames)
+    ]
+    return _write_browser_video(path, rendered, fps=fps, codecs=("VP90", "VP80"))
+
+
+def _write_browser_video(
+    path: Path,
+    frames: Sequence[np.ndarray],
+    *,
+    fps: float,
+    codecs: Sequence[str],
+) -> str:
+    """Write frames using the first available codec from a browser-safe list."""
+    if not frames:
+        raise ValueError("Cannot write track preview: no frames.")
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    h, w = frames[0].shape[:2]
+    errors: list[str] = []
+    for codec in codecs:
+        writer = cv2.VideoWriter(
+            str(path),
+            cv2.VideoWriter_fourcc(*codec),
+            max(1.0, float(fps)),
+            (w, h),
+        )
+        if not writer.isOpened():
+            writer.release()
+            errors.append(f"{codec}: unavailable")
+            continue
+        try:
+            for frame in frames:
+                writer.write(frame)
+        finally:
+            writer.release()
+        if path.is_file() and path.stat().st_size > 0:
+            return codec
+        errors.append(f"{codec}: empty output")
+    raise OSError(
+        f"Could not encode browser-compatible preview {path.name}: "
+        + "; ".join(errors)
     )
-    if not writer.isOpened():
-        raise OSError(f"Could not open video writer for track preview: {path}")
+
+
+def transcode_preview_to_webm(
+    source: str | Path,
+    output: str | Path,
+) -> dict[str, Any]:
+    """Convert a legacy preview into browser-compatible VP9/VP8 WebM."""
+    source_path = Path(source).resolve()
+    output_path = Path(output).resolve()
+    cap = cv2.VideoCapture(str(source_path))
+    if not cap.isOpened():
+        cap.release()
+        raise OSError(f"Could not open legacy preview: {source_path}")
+    fps = float(cap.get(cv2.CAP_PROP_FPS))
+    if fps <= 0:
+        fps = 5.0
+    frames: list[np.ndarray] = []
     try:
-        for frame_index, frame in enumerate(frames):
-            preview = render_track_preview_frame(frame, tracks, frame_index)
-            writer.write(preview)
+        while True:
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                break
+            frames.append(frame)
     finally:
-        writer.release()
+        cap.release()
+    if not frames:
+        raise OSError(f"Legacy preview contains no readable frames: {source_path}")
+    codec = _write_browser_video(
+        output_path,
+        frames,
+        fps=fps,
+        codecs=("VP90", "VP80"),
+    )
+    return {
+        "source_path": str(source_path),
+        "output_path": str(output_path),
+        "codec": codec,
+        "mime_type": "video/webm",
+        "frame_count": len(frames),
+        "fps": fps,
+    }
 
 
 def draw_tracks_overlay_preview(
@@ -882,11 +1398,23 @@ def update_workspace_motion_index_summary(
         "final_export_name": result.final_export_name,
         "source_path": result.source_path,
         "analysis_timestamp_utc": datetime.now(timezone.utc).isoformat(),
-        "downward_velocity_index_um_per_s": round(
-            result.downward_velocity_index_um_per_s, 6
+        "absolute_velocity_index_um_per_s": round(
+            result.general_movement_index_um_per_s, 6
         ),
         "general_movement_index_um_per_s": round(
             result.general_movement_index_um_per_s, 6
+        ),
+        "downward_velocity_index_um_per_s": round(
+            result.downward_velocity_index_um_per_s, 6
+        ),
+        "time_weighted_mean_speed_um_per_s": round(
+            result.time_weighted_mean_speed_um_per_s, 6
+        ),
+        "signed_vertical_velocity_um_per_s": round(
+            result.signed_vertical_velocity_um_per_s, 6
+        ),
+        "downward_velocity_contribution_um_per_s": round(
+            result.downward_velocity_contribution_um_per_s, 6
         ),
         "num_tracks_started": len(result.tracks),
         "num_tracks_with_valid_steps": result.num_tracks_with_valid_steps,
@@ -937,7 +1465,7 @@ def save_motion_index_outputs(
     output_dir.mkdir(parents=True, exist_ok=True)
     paths = motion_index_output_paths(output_dir, final_export_name)
 
-    save_trajectory_csv(paths["trajectory_csv"], tracks)
+    save_trajectory_csv(paths["trajectory_csv"], tracks, result.params)
 
     cv2.imwrite(
         str(paths["starting_points"]),
@@ -948,18 +1476,37 @@ def save_motion_index_outputs(
         draw_tracks_overlay_preview(first_frame, tracks),
     )
 
-    preview_error = ""
+    preview_errors: list[str] = []
+    mp4_codec = ""
+    webm_codec = ""
     try:
-        write_track_preview_video(
+        mp4_codec = write_track_preview_video(
             paths["track_preview"],
             frames,
             tracks,
             fps=preview_fps,
         )
     except OSError as exc:
-        preview_error = str(exc)
+        preview_errors.append(str(exc))
+    try:
+        webm_codec = write_track_preview_webm(
+            paths["track_preview_webm"],
+            frames,
+            tracks,
+            fps=preview_fps,
+        )
+    except OSError as exc:
+        preview_errors.append(str(exc))
 
+    preview_error = "; ".join(preview_errors)
     result.track_preview_error = preview_error
+    result.track_preview_mp4_codec = mp4_codec
+    result.track_preview_webm_codec = webm_codec
+    result.track_preview_webm = (
+        str(paths["track_preview_webm"])
+        if paths["track_preview_webm"].is_file()
+        else ""
+    )
     summary_payload = result.summary_dict()
     summary_payload["written_at_utc"] = _utc_now_iso()
     paths["summary_json"].write_text(json.dumps(summary_payload, indent=2), encoding="utf-8")
@@ -970,6 +1517,9 @@ def save_motion_index_outputs(
         "start_points_preview": str(paths["starting_points"]),
         "tracks_overlay_preview": str(paths["track_overlay"]),
         "track_preview_video": str(paths["track_preview"]),
+        "track_preview_webm": result.track_preview_webm,
+        "track_preview_mp4_codec": mp4_codec,
+        "track_preview_webm_codec": webm_codec,
         "track_preview_error": preview_error,
     }
 
@@ -1022,6 +1572,7 @@ def run_motion_index_analysis(
         raise ValueError("No tracks survived with valid motion steps.")
 
     downward_index, general_index, track_summaries = compute_motion_indices(tracks, params)
+    velocity_summary = compute_velocity_summary(tracks, params)
     valid_tracks, total_steps, mean_len = compute_track_statistics(tracks)
 
     result = MotionIndexResult(
@@ -1040,6 +1591,15 @@ def run_motion_index_analysis(
         downward_velocity_index_um_per_s=downward_index,
         general_movement_index_um_per_s=general_index,
         track_summaries=track_summaries,
+        time_weighted_mean_speed_um_per_s=(
+            velocity_summary.time_weighted_mean_speed_um_per_s
+        ),
+        signed_vertical_velocity_um_per_s=(
+            velocity_summary.signed_vertical_velocity_um_per_s
+        ),
+        downward_velocity_contribution_um_per_s=(
+            velocity_summary.downward_velocity_contribution_um_per_s
+        ),
         final_export_name=export_name,
         sample_id=sample_id,
         num_tracks_with_valid_steps=valid_tracks,
@@ -1063,6 +1623,9 @@ def run_motion_index_analysis(
     result.start_points_preview = outputs["start_points_preview"]
     result.tracks_overlay_preview = outputs["tracks_overlay_preview"]
     result.track_preview_video = outputs["track_preview_video"]
+    result.track_preview_webm = outputs.get("track_preview_webm", "")
+    result.track_preview_mp4_codec = outputs.get("track_preview_mp4_codec", "")
+    result.track_preview_webm_codec = outputs.get("track_preview_webm_codec", "")
     result.track_preview_error = outputs.get("track_preview_error", "")
     return result
 
@@ -1089,12 +1652,24 @@ def run_motion_index_test(
     print(f"Frames: {result.frame_count} ({result.frame_width}x{result.frame_height})")
     print(f"Tracks started: {len(result.tracks)}")
     print(
+        "Absolute Velocity Index: "
+        f"{result.general_movement_index_um_per_s:.4f} um/s"
+    )
+    print(
         "Downward Velocity Index: "
         f"{result.downward_velocity_index_um_per_s:.4f} um/s"
     )
     print(
-        "General Movement Index: "
-        f"{result.general_movement_index_um_per_s:.4f} um/s"
+        "Time-weighted Mean Speed: "
+        f"{result.time_weighted_mean_speed_um_per_s:.4f} um/s"
+    )
+    print(
+        "Signed Vertical Velocity: "
+        f"{result.signed_vertical_velocity_um_per_s:.4f} um/s"
+    )
+    print(
+        "Downward Velocity Contribution: "
+        f"{result.downward_velocity_contribution_um_per_s:.4f} um/s"
     )
     print(f"Trajectory CSV: {result.trajectory_csv}")
     print(f"Summary JSON: {result.summary_json}")

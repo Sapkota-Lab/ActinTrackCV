@@ -40,7 +40,7 @@ def resolve_propagation_targets(
     """
     Resolve targets for annotation propagation.
 
-    Default scope is same_biological_batch (other files from the same Arabidopsis sample).
+    Default scope is same_biological_batch (other files from the same sample/line).
     """
     root = Path(root).resolve()
     df = load_samples_csv(root / METADATA_DIR / SAMPLES_CSV)

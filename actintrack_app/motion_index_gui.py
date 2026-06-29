@@ -34,6 +34,8 @@ from actintrack_app.motion_index import (
     MotionIndexParams,
     MotionIndexResult,
     ProcessedInputOption,
+    TRACKING_METHOD_BRIGHTEST_LOCAL,
+    TRACKING_METHOD_TEMPLATE,
     discover_processed_inputs,
     run_motion_index_analysis,
     update_workspace_motion_index_summary,
@@ -61,15 +63,22 @@ class MotionIndexSettingsDialog(QDialog):
         layout = QVBoxLayout(self)
 
         intro = QLabel(
-            "Template-matching motion index on the processed cropped ROI. "
-            "Downward motion uses increasing y-coordinate; upward steps are ignored "
-            "for the Downward Velocity Index."
+            "Bright-point motion index on the processed cropped ROI. Absolute "
+            "movement is the primary metric; downward motion is also reported."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
         defaults = MotionIndexParams()
         form = QFormLayout()
+        self.combo_method = QComboBox()
+        self.combo_method.addItem(
+            "Brightest nearby points",
+            TRACKING_METHOD_BRIGHTEST_LOCAL,
+        )
+        self.combo_method.addItem("Template matching", TRACKING_METHOD_TEMPLATE)
+        method_index = self.combo_method.findData(defaults.tracking_method)
+        self.combo_method.setCurrentIndex(max(0, method_index))
         self.spin_points = QSpinBox()
         self.spin_points.setRange(1, 50)
         self.spin_points.setValue(defaults.num_starting_points)
@@ -102,11 +111,12 @@ class MotionIndexSettingsDialog(QDialog):
         self.combo_direction = QComboBox()
         self.combo_direction.addItem("increasing_y (downward)", "increasing_y")
 
+        form.addRow("Tracking method:", self.combo_method)
         form.addRow("Starting points:", self.spin_points)
         form.addRow("Min point spacing (px):", self.spin_spacing)
         form.addRow("Search radius (px):", self.spin_search)
         form.addRow("Template patch size (px, odd):", self.spin_patch)
-        form.addRow("Min template confidence:", self.spin_confidence)
+        form.addRow("Min match confidence:", self.spin_confidence)
         form.addRow("Lookahead frames:", self.spin_lookahead)
         form.addRow("Microns per pixel:", self.spin_mpp)
         form.addRow("Seconds per frame:", self.spin_spf)
@@ -142,6 +152,9 @@ class MotionIndexSettingsDialog(QDialog):
             microns_per_pixel=float(self.spin_mpp.value()),
             seconds_per_frame=float(self.spin_spf.value()),
             downward_direction=str(self.combo_direction.currentData()),
+            tracking_method=str(
+                self.combo_method.currentData() or TRACKING_METHOD_BRIGHTEST_LOCAL
+            ),
         )
 
 
@@ -190,8 +203,8 @@ class MotionIndexCompleteDialog(QDialog):
         lines = [
             "F-actin Motion Index Complete",
             "",
+            f"Absolute Velocity Index: {result.general_movement_index_um_per_s:.4f} µm/sec",
             f"Downward Velocity Index: {result.downward_velocity_index_um_per_s:.4f} µm/sec",
-            f"General Movement Index: {result.general_movement_index_um_per_s:.4f} µm/sec",
             f"Tracks Started: {len(result.tracks)}",
             f"Tracks with Valid Steps: {result.num_tracks_with_valid_steps}",
             f"Total Valid Steps: {result.total_valid_steps}",

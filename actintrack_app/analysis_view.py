@@ -64,7 +64,7 @@ class AnalysisViewWidget(QWidget):
         layout.setContentsMargins(8, 8, 8, 8)
 
         intro = QLabel(
-            "Tracking and motion-index metrics aggregated by Breed and Sample. "
+            "Tracking, motion-index, and optical-flow metrics aggregated by Breed and Sample. "
             "Results are read from saved sample data; opening this view does not "
             "re-run tracking."
         )
@@ -89,11 +89,11 @@ class AnalysisViewWidget(QWidget):
                 "Breed",
                 "Samples",
                 "Samples with Results",
+                "Avg Absolute Velocity",
                 "Avg Downward Velocity",
-                "Avg General Movement",
                 "Avg Motion Index",
+                "Std Dev Absolute Velocity",
                 "Std Dev Downward Velocity",
-                "Std Dev General Movement",
                 "OF General Movement (µm/s)",
                 "OF Downward Motion (µm/s)",
                 "OF Net Y Velocity (µm/s)",
@@ -109,8 +109,8 @@ class AnalysisViewWidget(QWidget):
                 "Sample",
                 "Status",
                 "Data Status",
+                "Absolute Velocity",
                 "Downward Velocity",
-                "General Movement",
                 "Motion Index",
                 "Valid Tracks",
                 "Valid Steps",
@@ -129,8 +129,8 @@ class AnalysisViewWidget(QWidget):
             [
                 "Rank",
                 "Breed",
+                "Avg Absolute Velocity",
                 "Avg Downward Velocity",
-                "Avg General Movement",
                 "Avg Motion Index",
                 "Valid Sample Count",
             ]
@@ -181,11 +181,11 @@ class AnalysisViewWidget(QWidget):
                 (row.breed, row.breed, False),
                 (str(row.sample_count), row.sample_count, True),
                 (str(row.samples_with_results), row.samples_with_results, True),
-                (_fmt_float(row.avg_downward_velocity), row.avg_downward_velocity, True),
                 (_fmt_float(row.avg_general_movement), row.avg_general_movement, True),
+                (_fmt_float(row.avg_downward_velocity), row.avg_downward_velocity, True),
                 (_fmt_float(row.avg_motion_index), row.avg_motion_index, True),
-                (_fmt_float(row.std_downward_velocity), row.std_downward_velocity, True),
                 (_fmt_float(row.std_general_movement), row.std_general_movement, True),
+                (_fmt_float(row.std_downward_velocity), row.std_downward_velocity, True),
                 (_fmt_float(row.avg_of_general_movement), row.avg_of_general_movement, True),
                 (_fmt_float(row.avg_of_downward_motion), row.avg_of_downward_motion, True),
                 (_fmt_float(row.avg_of_net_y_velocity), row.avg_of_net_y_velocity, True),
@@ -208,8 +208,8 @@ class AnalysisViewWidget(QWidget):
                 (row.sample_label, row.sample_label, False),
                 (row.status, row.status, False),
                 (row.data_status, row.data_status, False),
-                (_fmt_float(m.downward_velocity), m.downward_velocity, True),
                 (_fmt_float(m.general_movement), m.general_movement, True),
+                (_fmt_float(m.downward_velocity), m.downward_velocity, True),
                 (_fmt_float(m.motion_index), m.motion_index, True),
                 (tracks, m.valid_tracks, True),
                 (_fmt_int(m.valid_steps), m.valid_steps, True),
@@ -233,8 +233,8 @@ class AnalysisViewWidget(QWidget):
             values: list[tuple[str, Any, bool]] = [
                 (str(row.rank), row.rank, True),
                 (row.breed, row.breed, False),
-                (_fmt_float(row.avg_downward_velocity), row.avg_downward_velocity, True),
                 (_fmt_float(row.avg_general_movement), row.avg_general_movement, True),
+                (_fmt_float(row.avg_downward_velocity), row.avg_downward_velocity, True),
                 (_fmt_float(row.avg_motion_index), row.avg_motion_index, True),
                 (str(row.valid_sample_count), row.valid_sample_count, True),
             ]

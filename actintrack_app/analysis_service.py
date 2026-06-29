@@ -138,7 +138,13 @@ def _parse_tracking_payload(data: dict[str, Any], *, source_path: Path) -> Sampl
         )
 
     downward = float(data.get("downward_velocity_index_um_per_s", 0.0))
-    general = float(data.get("general_movement_index_um_per_s", 0.0))
+    general = float(
+        data.get(
+            "absolute_velocity_index_um_per_s",
+            data.get("general_movement_index_um_per_s", 0.0),
+        )
+    )
+    motion_index = float(data.get("primary_velocity_index_um_per_s", general))
     params = data.get("parameters") or {}
     confidence = None
     if isinstance(params, dict) and params.get("min_template_confidence") is not None:
@@ -158,7 +164,7 @@ def _parse_tracking_payload(data: dict[str, Any], *, source_path: Path) -> Sampl
     return SampleMetrics(
         downward_velocity=downward,
         general_movement=general,
-        motion_index=downward,
+        motion_index=motion_index,
         valid_tracks=tracks_used,
         valid_steps=int(data.get("total_valid_steps", 0) or 0),
         confidence=confidence,
@@ -362,7 +368,11 @@ def compute_breed_analysis(
     sample_rows: list[SampleAnalysisRow],
 ) -> BreedSummaryRow:
     valid = [r for r in sample_rows if r.metrics.has_valid_result]
-    downward = [r.metrics.downward_velocity for r in valid if r.metrics.downward_velocity is not None]
+    downward = [
+        r.metrics.downward_velocity
+        for r in valid
+        if r.metrics.downward_velocity is not None
+    ]
     general = [r.metrics.general_movement for r in valid if r.metrics.general_movement is not None]
     motion = [r.metrics.motion_index for r in valid if r.metrics.motion_index is not None]
     of_valid = [r for r in sample_rows if r.metrics.of_has_valid_result]
@@ -405,10 +415,10 @@ def compute_breed_analysis(
 
 
 def _comparison_sort_key(row: BreedSummaryRow) -> tuple[float, float, float, str]:
-  downward = row.avg_downward_velocity if row.avg_downward_velocity is not None else float("-inf")
-  general = row.avg_general_movement if row.avg_general_movement is not None else float("-inf")
-  motion = row.avg_motion_index if row.avg_motion_index is not None else float("-inf")
-  return (downward, general, motion, row.breed)
+    general = row.avg_general_movement if row.avg_general_movement is not None else float("-inf")
+    downward = row.avg_downward_velocity if row.avg_downward_velocity is not None else float("-inf")
+    motion = row.avg_motion_index if row.avg_motion_index is not None else float("-inf")
+    return (general, motion, downward, row.breed)
 
 
 def build_breed_comparisons(summaries: list[BreedSummaryRow]) -> list[BreedComparisonRow]:

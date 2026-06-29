@@ -2,9 +2,9 @@
 
 ## Executive Summary
 
-ActinTrackCV is an early-stage research software project for quantifying F-actin organization, dynamics, and 3D structural features from confocal microscopy data. The project is currently in the data-understanding and preprocessing phase. The immediate work is not model training yet; it is building a clean foundation for image extraction, biological tracking-ROI detection, 2D filament coordinate tracking, velocity measurement, and an eventual R Shiny frontend.
+ActinTrackCV is an early-stage research software project for quantifying F-actin organization, dynamics, and 3D structural features from **Arabidopsis** confocal microscopy data. The biological material is **single reproductive cells** (elongated ovule / embryo-sac cells) imaged with **Lifeact** (F-actin) and **H2B** (nucleus) reporters — not whole seeds or bulk tissue. The project is currently focused on a traditional computer-vision tracking workflow rather than Roboflow annotation or AI model training. The immediate work is refining, testing, and calibrating a bright-point tracking method for 2D actin velocity measurement.
 
-The core scientific goal is to compare wild-type and mutant actin behavior. The local context and slide deck frame the biological questions around:
+The core scientific goal is to compare wild-type and mutant actin behavior across four genetic backgrounds: **WT_218**, **WT_550**, **Mutant_515** (`scar2` on #218), and **Mutant_175** (`xig` on #218). The local context and slide deck frame the biological questions around:
 
 - F-actin cable folding differences.
 - Actin velocity differences between A and B areas.
@@ -12,17 +12,27 @@ The core scientific goal is to compare wild-type and mutant actin behavior. The 
 - Whether a ring-like actin structure is moving.
 - 3D actin structure from confocal Z-stacks.
 
-The current data are a mixture of lossy `.avi`/`.mp4` exports and a small number of higher-value `.tif` stacks. Raw microscope files are still pending. Until those arrive, the practical plan is:
+Meeting update, 2026-06-11:
+
+- Roboflow is no longer the active path.
+- The near-term direction is to try traditional computer-vision methods before model training.
+- The Dr. Ju tracking method is: in frame 0, find the 10 brightest actin points or small grouped bright regions; in each next frame, find the corresponding bright points in the local vicinity of the prior points; repeat through the sequence; convert absolute displacement/change into calibrated velocity using pixel size and acquisition interval.
+- DINOv3 from MetaAI was mentioned as a possible all-around AI model to investigate, but AI models are secondary for now because they can make the project harder to explain and harder for others to trust or adopt.
+
+For a plain-language record of direction changes, see `PROJECT_CHANGES_NATURAL_LANGUAGE.md`.
+
+The current data are a mixture of lossy `.avi`/`.mp4` exports, a small number of higher-value `.tif` stacks, and newly received Olympus `.oir` z-stack files. Until the tracking method is validated and calibration metadata are confirmed, the practical plan is:
 
 1. Establish the **2D velocity-tracking pipeline first** using the currently available `.avi`, `.mp4`, and usable 2D views/projections from `.tif` files.
 2. Focus that 2D pipeline on the upper/central actin-rich tracking ROI shown by the A/B labels in `Picture1.jpg`; exclude the lower perinuclear/nucleus-adjacent C region from the primary tracking workflow.
-3. Keep thickness, depth profiles, and other 3D metrics decoupled as a future module based on the `.tif` stacks.
-4. Build the frontend shell for an R Shiny app with a multi-tab design: Tab 1 for 2D Tracking, Tab 2 for 3D Analysis as a future milestone.
+3. Implement and validate the bright-point tracker before adding learned segmentation or foundation-model workflows.
+4. Keep thickness, depth profiles, and other 3D metrics decoupled as a future module based on the `.tif` and `.oir` z-stacks.
+5. Treat the current Python desktop app as a prototype/workbench and build the final user-facing interface in R Shiny around validated CSV/JSON/QC outputs.
 
 The project should be thought of as two linked tracks:
 
-- **Track A: 2D Tracking and Velocity** from `.avi`/`.mp4` frames plus usable 2D `.tif` slices/projections, focused on the actin-rich biological tracking ROI, filament coordinates, and velocity over time. This is the main focus.
-- **Track B: 3D Analysis** from 16-bit `.tif` Z-stacks, focused on filament thickness and depth profiles. This is a future milestone and should remain separate from the 2D tracking code path.
+- **Track A: 2D Tracking and Velocity** from `.avi`/`.mp4` frames plus usable 2D `.tif` slices/projections, focused on the actin-rich biological tracking ROI, bright-point coordinates, local frame-to-frame matching, and calibrated velocity over time. This is the main focus.
+- **Track B: 3D Analysis** from 16-bit `.tif` and `.oir` Z-stacks, focused on filament thickness and depth profiles. This is a future milestone and should remain separate from the 2D tracking code path.
 
 ## Current Repository Layout
 
@@ -31,33 +41,35 @@ At the time of inspection, the repository contains these main components:
 ```text
 .
 ├── README.md
-├── extract_2d_frames.py
-├── frames_index.csv
 ├── PROJECT_OVERVIEW.md
-├── frames/
-├── local_context/
-├── raw_source/
-├── .venv/
-└── .gitignore
+├── requirements.txt
+├── actintrack_app/          ← PyQt workbench (algorithm development)
+├── shiny_app/               ← R Shiny UI (target end-user app)
+├── scripts/                 ← shiny_bridge, validate_tracker, motion index CLI
+├── tests/
+├── docs/
+├── extract_2d_frames.py     ← legacy frame extraction CLI
+├── frames_index.csv         ← legacy manifest (older source filenames)
+├── frames/                  ← extracted PNG frames (legacy pipeline)
+├── local_context/           ← lab deck, reference images (gitignored)
+├── raw/                     ← current flat source-media tree (gitignored)
+├── raw_source/              ← older nested workspace archive (gitignored)
+└── .venv/
 ```
+
+Workspace data (`raw/`, `processed/`, `metadata/`) are created locally and are not committed to git.
 
 ### Root-Level Files
 
-`README.md` is a short project stub:
+`README.md` describes the desktop app workflow and now states the active traditional computer-vision tracking direction.
 
-```text
-#ActinTrackCV
+`extract_2d_frames.py` is a legacy preprocessing script for video exports. It:
 
-AI-assisted computer vision for quantifying actin filament dynamics and 3D structural features from confocal microscopy images
-```
-
-`extract_2d_frames.py` is the current production preprocessing script for video exports. It:
-
-- Reads `.avi` and `.mp4` files from `raw_source/`.
+- Reads `.avi` and `.mp4` files from `raw_source/` (or an equivalent flat `raw/` tree if paths are updated).
 - Skips `.tif` stacks and derived `.jpg` montage files.
 - Extracts 10 evenly sampled frames per movie.
 - Saves lossless `.png` files under `frames/<batch_name>/`.
-- Writes `frames_index.csv` as a manifest for Roboflow upload and downstream data tracking.
+- Writes `frames_index.csv` as a manifest for downstream tracking, QC, and data provenance.
 
 `frames_index.csv` currently contains 150 rows across 15 movie batches. Every source movie reports 15 frames, and the script extracted frame numbers:
 
@@ -67,11 +79,11 @@ AI-assisted computer vision for quantifying actin filament dynamics and 3D struc
 
 `.gitignore` is configured to ignore local environments, model outputs, image/video/raw microscopy file types, and `local_context/`. Note that some ignored assets may already be tracked in git if they were committed before `.gitignore` was updated. Repository hygiene should be checked before any serious commit or publication-facing cleanup.
 
-`.venv/` is a local Python virtual environment. It contains `opencv-python`, `numpy`, `pandas`, and `tqdm`, which are enough for `extract_2d_frames.py`. It does not currently contain `tifffile` or `Pillow`, even though system Python had those available during inspection. A future `requirements.txt` should make this reproducible.
+`requirements.txt` lists the Python dependencies for the desktop app, tracking modules, and tests (`opencv-python`, `numpy`, `pandas`, `PyQt6`, `tifffile`, `tqdm`).
 
 ### `local_context/`
 
-`local_context/Claude Transcript ActinTrack.md` is the main project history and rationale. It documents the earlier decisions around Roboflow, annotation classes, frame extraction, dataset organization, and the current uncertainty around actin cable annotation.
+`local_context/Claude Transcript ActinTrack.md` is historical project context. It documents the earlier Roboflow annotation path, which is no longer active, plus frame extraction, dataset organization, and the uncertainty around actin cable annotation.
 
 `local_context/Picture1.jpg` is the key reference image for the biological crop discussion. Its yellow labels mark regions within the cell. A/B correspond to the upper and central actin-rich tracking regions; C marks the lower perinuclear/nucleus-adjacent region that is excluded for the current 2D tracking milestone.
 
@@ -86,103 +98,78 @@ AI-assisted computer vision for quantifying actin filament dynamics and 3D struc
 
 This slide deck is important because the exported video metadata reports playback at 6 fps, but the slide deck likely describes the actual biological acquisition interval. For analysis, use acquisition metadata or confirmed lab notes, not video playback FPS.
 
-### `raw_source/`
+### `raw/` (current source media)
 
-`raw_source/` contains the current source media. It should be treated as read-only input data.
+`raw/` is the flat source-media tree used by the active workspace. It should be treated as read-only input data. Files sit directly inside breed folders (no nested sample subfolders).
 
 ```text
-raw_source/
-├── 1_WT_218/
-├── 2_WT_550/
-├── 3_Mutant_515/
-└── 4_Mutant_175/
+raw/
+├── 1_WT_218/     (7 files: TIFF, AVI, JPG, OIR)
+├── 2_WT_550/     (5× AVI)
+├── 3_Mutant_515/ (1× AVI, 4× MP4)
+└── 4_Mutant_175/ (4× AVI)
 ```
+
+**Naming convention:** `{WT|MUT}{id}_{NNNN}.{ext}` inside `{ordinal}_{WT|Mutant}_{id}/` (e.g. `WT550_0003.avi` in `2_WT_550/`).
+
+**21 files total:** 11× AVI, 4× MP4, 3× OIR, 2× TIFF, 1× JPG montage.
 
 #### `1_WT_218/`
 
-Files:
-
-- `01.tif`
-- `02.tif`
-- `03.avi`
-- `Montage of MAX_01.jpg`
-
-Observed metadata:
-
-| File | Type | Shape / dimensions | Notes |
-|---|---:|---:|---|
-| `01.tif` | TIFF | `(15, 2, 800, 412) uint16` | 15-plane, 2-channel stack. Channel 0 is actin. Channel 1 is nucleus. User visually confirmed the first axis is different depths, so this is a Z-stack rather than a time movie. |
-| `02.tif` | TIFF | `(28, 360, 196) uint16` | Appears to be a single-channel stack or differently stored Z-stack. Needs visual inspection before use. |
-| `03.avi` | AVI | 15 frames, 290 x 624, Motion JPEG | Exported video, likely actin-channel-only or actin-dominant. |
-| `Montage of MAX_01.jpg` | JPEG | 1236 x 800 | Derived display montage. Not raw data. Useful as a clean reference for actin-signal gradients without the yellow annotation boxes in `Picture1.jpg`. |
-
-`Montage of MAX_01.jpg` contains separate display views, but the current tracking crop should be derived from the actin-rich biological region within a cell, not from equal-width display-panel fractions.
+| File | Type | Notes |
+|---|---|---|
+| `WT218_0001.tif` | TIFF | 30-page ImageJ hyperstack, 800×412 `uint16`; 2 channels × 15 slices; `unit=micron` |
+| `WT218_0002.tif` | TIFF | 28-slice Z-stack, 360×196 `uint16`; `spacing=0.83` micron |
+| `WT218_0003.avi` | AVI | 15 frames, 290×624, Motion JPEG |
+| `WT218_0004.jpg` | JPEG | 1236×800 three-panel actin / nucleus / overlay montage |
+| `WT218_0005–0007.oir` | OIR | Olympus FV3000 confocal Z-stacks; 334×629, 12-bit, 60× water objective, EYFP |
 
 #### `2_WT_550/`
 
-Files:
+Five AVI exports, 15 frames each at 6.0 fps playback:
 
-- `01.avi`
-- `02.avi`
-- `03.avi`
-- `04.avi`
-- `05.avi`
-
-Observed video metadata:
-
-| File | Frames | Export FPS | Dimensions |
-|---|---:|---:|---:|
-| `01.avi` | 15 | 6.0 | 302 x 604 |
-| `02.avi` | 15 | 6.0 | 394 x 808 |
-| `03.avi` | 15 | 6.0 | 310 x 624 |
-| `04.avi` | 15 | 6.0 | 316 x 692 |
-| `05.avi` | 15 | 6.0 | 338 x 752 |
-
-These are lossy Motion JPEG exports. They are usable for prototype segmentation and annotation, but they should not be treated as fully calibrated raw microscopy data.
+| File | Dimensions |
+|---|---:|
+| `WT550_0001.avi` | 302×604 |
+| `WT550_0002.avi` | 394×808 |
+| `WT550_0003.avi` | 310×624 |
+| `WT550_0004.avi` | 316×692 |
+| `WT550_0005.avi` | 338×752 |
 
 #### `3_Mutant_515/`
 
-Files:
+| File | Type | Dimensions |
+|---|---|---:|
+| `MUT515_0001.avi` | AVI | 444×704 |
+| `MUT515_0002.mp4` | MP4 (H.264) | 326×741 |
+| `MUT515_0003.mp4` | MP4 | 308×663 |
+| `MUT515_0004.mp4` | MP4 | 320×718 |
+| `MUT515_0005.mp4` | MP4 | 335×676 |
 
-- `01_676-8-2.avi`
-- `02_676-6-2.mp4`
-- `03_676-6-3.mp4`
-- `04_676-6-3.mp4`
-- `05_676-8-3.mp4`
-
-Observed video metadata:
-
-| File | Frames | Export FPS | Dimensions |
-|---|---:|---:|---:|
-| `01_676-8-2.avi` | 15 | 6.0 | 444 x 704 |
-| `02_676-6-2.mp4` | 15 | 6.0 | 326 x 741 |
-| `03_676-6-3.mp4` | 15 | 6.0 | 308 x 663 |
-| `04_676-6-3.mp4` | 15 | 6.0 | 320 x 718 |
-| `05_676-8-3.mp4` | 15 | 6.0 | 335 x 676 |
-
-The duplicate `676-6-3` suffix on files `03` and `04` should be clarified with the data provider. It may represent two acquisitions from the same biological replicate, or it may be a naming error.
+All 15 frames, 6.0 fps playback.
 
 #### `4_Mutant_175/`
 
-Files:
+Four AVI exports, 15 frames each at 6.0 fps playback:
 
-- `01.avi`
-- `02.avi`
-- `03.avi`
-- `04.avi`
+| File | Dimensions |
+|---|---:|
+| `MUT175_0001.avi` | 420×384 |
+| `MUT175_0002.avi` | 260×472 |
+| `MUT175_0003.avi` | 364×406 |
+| `MUT175_0004.avi` | 312×436 |
 
-Observed video metadata:
+These are lossy video exports. They are usable for prototype tracking and QC, but they should not be treated as fully calibrated raw microscopy data. Lab slide notes say **30 sec/frame** for biological timing; video playback reports **6 fps**.
 
-| File | Frames | Export FPS | Dimensions |
-|---|---:|---:|---:|
-| `01.avi` | 15 | 6.0 | 420 x 384 |
-| `02.avi` | 15 | 6.0 | 260 x 472 |
-| `03.avi` | 15 | 6.0 | 364 x 406 |
-| `04.avi` | 15 | 6.0 | 312 x 436 |
+### `raw_source/` (legacy archive)
+
+`raw_source/` is an older nested workspace snapshot, not a mirror of the current `raw/` tree. It uses the previous import layout (`raw/<breed>/<sample_name>/<file>`) and earlier filenames such as `01.avi` and `03.avi`. The committed `frames_index.csv` manifest references those legacy paths. Treat `raw/` as the authoritative on-disk inventory for the current dataset.
+
+Additional OIR Z-stacks for line 218 also exist under `20260608_WT_Z stacks/` (gitignored).
 
 ### `frames/`
 
-`frames/` contains extracted PNG frames from the current video exports. There are 15 batch folders and 150 PNG frames total.
+`frames/` contains extracted PNG frames from video exports via the legacy `extract_2d_frames.py` pipeline. There are 15 batch folders and 150 PNG frames total. The manifest `frames_index.csv` references **older source paths** (e.g. `2_WT_550/01.avi`) that correspond to the same movies now named `WT550_0001.avi` under `raw/`.
 
 Each folder maps to one source movie:
 
@@ -215,7 +202,7 @@ The current manifest distribution is:
 | Mutant | 175 | 4 | 40 |
 | Total | - | 15 | 150 |
 
-`frames/inspect_tiff.py` is a scratch inspection helper that reads `1_WT_218/01.tif`, extracts the middle slice for channels 0 and 1, normalizes each to 8-bit, and saves `middle_ch0.png` / `middle_ch1.png`. As written, its relative path assumes it is run from a directory containing `1_WT_218/01.tif`; in this repository the correct path would usually be `raw_source/1_WT_218/01.tif`. Treat it as exploratory code, not production.
+`frames/inspect_tiff.py` is a scratch inspection helper that reads `1_WT_218/WT218_0001.tif` (or the legacy `01.tif` name), extracts the middle slice for channels 0 and 1, normalizes each to 8-bit, and saves `middle_ch0.png` / `middle_ch1.png`. Treat it as exploratory code, not production.
 
 ## Current Data Interpretation
 
@@ -244,48 +231,46 @@ The videos report 15 frames each. OpenCV reports 6 fps, but the PowerPoint says 
 The current 2D workflow is:
 
 ```text
-raw_source/*.avi, *.mp4, and usable 2D views from *.tif
+raw/*.avi, *.mp4, and usable 2D views from *.tif
     -> extract_2d_frames.py
     -> detect upper/central actin tracking ROI
     -> frames/<movie_batch>/*.png or equivalent ROI frame products
     -> frames_index.csv
-    -> Roboflow instance-segmentation project
-    -> manual annotations / future model training
-    -> filament coordinate extraction
-    -> frame-to-frame tracking
+    -> detect the top N bright points or grouped bright regions in frame 0
+    -> search locally around each prior point in the next frame
+    -> link matched bright points through time
     -> velocity-over-time calculation
-    -> R Shiny visualization
+    -> QC overlays and result tables
 ```
 
-This is the main computational path. The first deliverable should be a working 2D tracking pipeline that can ingest the current video-derived frames and available `.tif`-derived 2D views, isolate the A/B regions, track filament coordinates, and calculate velocity over time.
+This is the main computational path. The first deliverable should be a working 2D tracking pipeline that can ingest the current video-derived frames and available `.tif`-derived 2D views, isolate the A/B regions, track bright actin landmarks, and calculate velocity over time.
 
-The first model should probably focus on what the current video frames can support reliably:
+The current first-pass algorithm should stay simple and explainable:
 
-- `entire_cell`
-- `nucleus`, when visible or inferable
-- Actin structural labels only after the lab decides how to handle dense meshwork
+1. In the first usable frame, detect the 10 brightest actin points or connected bright-pixel groups within the tracking ROI.
+2. In the next frame, search near each prior point for the brightest local candidate.
+3. Link candidates over time into short tracks.
+4. Use absolute displacement/change across frames to calculate calibrated velocity.
+5. Save overlays that show exactly which points were tracked so the lab can reject bad tracks visually.
 
-The current AVI/MP4 frames often show dense interconnected actin networks rather than cleanly separable cables. That makes a strict "one polygon per cable" rule difficult or impossible on some images. The immediate recommendation from the transcript was to pause cable annotation, keep cell/nucleus annotation moving, and ask the PI/lab which actin labeling strategy is biologically meaningful.
+The method needs explicit parameters that can be tested and surfaced in the app:
 
-Possible actin annotation strategies:
+- number of points or regions to track, initially 10;
+- bright-point grouping radius or connected-component threshold;
+- local search radius in pixels;
+- minimum intensity / prominence threshold;
+- maximum allowed jump between frames;
+- pixel size in microns;
+- acquisition interval, likely 30 sec/frame from lab notes unless raw metadata says otherwise.
 
-1. **Split classes biologically:**
-   - `f_actin_cable_discrete`
-   - `f_actin_meshwork`
-   - `f_actin_perinuclear`
-2. **Keep one class but allow modes:**
-   - discrete cable polygons where clear
-   - dense meshwork polygon where individual cables are not resolvable
-3. **Defer actin cable labels temporarily:**
-   - train a baseline cell/nucleus model first
-   - revisit actin labels once raw files or better imagery arrive
+Roboflow annotations and AI model training are not active milestones. They can remain historical context and possible future work if traditional CV is insufficient.
 
 ### Track B: 3D Analysis Workflow
 
 The 3D workflow is a future milestone and should remain separate from the 2D tracking path:
 
 ```text
-raw_source/*.tif
+raw/*.tif, *.oir
     -> inspect stack shape/channel order
     -> preserve 16-bit intensity
     -> annotate or segment in 3D-aware tooling
@@ -304,9 +289,9 @@ Roboflow is fundamentally 2D and is not the right primary tool for true 3D annot
 
 The 3D metrics should eventually include filament thickness, depth profiles, cable or mesh volume, projected area, skeleton length, branch/junction counts, radial/perinuclear distribution, and Z-localization. These metrics should not be mixed into the initial 2D velocity-tracking code path.
 
-## Roboflow Context and Annotation State
+## Historical Roboflow Context
 
-The transcript documents several important Roboflow decisions:
+Roboflow is no longer the active workflow. The transcript still documents several useful historical decisions:
 
 - The original project was accidentally an Object Detection project. That would have caused polygon annotations to export as bounding boxes, which would destroy geometry for F-actin work.
 - The project was duplicated into an Instance Segmentation project.
@@ -324,7 +309,7 @@ The transcript documents several important Roboflow decisions:
 
 The transcript includes an annotation SOP draft, but no `ANNOTATION_SOP_v0.1.md` file was found in this repository during inspection. If the SOP was saved elsewhere, it should be copied into the repo once the lab is comfortable tracking it here.
 
-Recommended near-term annotation policy:
+Former near-term annotation policy, now superseded by the traditional CV direction:
 
 - Do not randomly split frames across train/validation/test. Split by movie batch.
 - Annotate only a small number of frames per movie at first, because frames within the same 15-frame sequence are correlated.
@@ -332,6 +317,8 @@ Recommended near-term annotation policy:
 - Tag images where the nucleus is inferred from actin signal rather than directly visible: `no_nucleus_channel`.
 - Tag images with unresolved actin meshwork: `dense_meshwork_visible`.
 - Do not commit to per-cable labels until the lab decides whether the data actually resolves individual cables.
+
+The relevant lesson from this branch is that dense actin meshwork is difficult to express as clean per-cable instance annotations. The current bright-point tracker avoids that annotation burden and is easier to explain: it measures motion of high-signal actin landmarks instead of requiring a trained segmentation model.
 
 ## Biological Tracking ROI Requirement
 
@@ -359,7 +346,7 @@ For raw `.tif` stacks, preserve channels and Z/T axes. Use the actin channel for
 
 ## 2D Tracking and A/B Metrics Direction
 
-The primary script direction is now a 2D tracking and velocity pipeline. Ratio-style A/B metrics can still be useful, but they are secondary to coordinate tracking and should be implemented only after the A/B input definition is clear. The phrase "A and B" is currently overloaded:
+The primary script direction is now a traditional CV 2D tracking and velocity pipeline. Ratio-style A/B metrics can still be useful, but they are secondary to coordinate tracking and should be implemented only after the A/B input definition is clear. The phrase "A and B" is currently overloaded:
 
 - In `Picture1.jpg`, A and B refer to biological tracking regions within the actin-rich cell body.
 - In the PowerPoint, "Actin velocity differences between A and B areas" likewise appears to mean biological areas or regions of the cell.
@@ -377,11 +364,20 @@ A robust first version of the 2D tracking script should:
 - Know whether the file is a raw stack, single frame, or rendered montage.
 - Detect the upper/central filament tracking ROI using actin foreground, signal mass, and the gradient into the lower perinuclear region.
 - If raw `.tif`: preserve 16-bit data and separate channel arrays.
-- Extract filament coordinates in each usable timepoint/frame.
-- Link coordinates over time into tracks.
+- Detect the top N bright points or bright connected components in the first usable frame.
+- In each subsequent frame, search within a local neighborhood around each previous point and select the strongest nearby candidate.
+- Link candidate positions over time into tracks, with clear handling for missed detections and ambiguous matches.
 - Calculate velocity over time using the confirmed acquisition interval, not video playback FPS.
 - Write a CSV table of per-frame/per-track measurements.
-- Save preview images so users can verify exactly what was measured.
+- Save preview images or videos with tracked points, IDs, local search windows, and rejected candidates so users can verify exactly what was measured.
+
+The first review pass for this method should answer:
+
+- Are the detected points biologically meaningful actin landmarks, or just saturated/noisy pixels?
+- Are multiple points collapsing onto the same bright region?
+- Does the local search radius keep tracks stable without preventing real movement?
+- Are tracks lost when intensity flickers or when the cell rotates/deforms?
+- Does the velocity output use calibrated units, not raw pixels/frame, once pixel size and acquisition interval are available?
 
 Optional A/B comparison outputs can then be added:
 
@@ -391,11 +387,15 @@ Optional A/B comparison outputs can then be added:
 - `A / B` ratio with safe handling for zero or near-zero B
 - velocity differences between A and B regions, once the regions are defined
 
-Future versions can add skeletonization, optical-flow-assisted tracking, and richer A/B comparison metrics once segmentation masks and acquisition timing are reliable. Cable thickness should remain part of the future 3D analysis module unless the lab defines a 2D proxy for it.
+Future versions can add skeletonization, optical-flow-assisted tracking, feature descriptors, or learned models once the bright-point baseline is understood. Cable thickness should remain part of the future 3D analysis module unless the lab defines a 2D proxy for it.
 
 ## R Shiny Frontend Direction
 
-The current plan is to build only the frontend while waiting for raw files. The Shiny app should use a multi-tab design that keeps distinct computational tasks separated.
+The final user-facing app should be R Shiny, not the current Python/PyQt prototype. The Python app and Python/OpenCV modules are useful as an algorithm-development workbench: they should produce stable CSV, JSON, and QC overlay outputs that the Shiny app can load and present.
+
+Implementation status: `shiny_app/` now provides source discovery, real-frame preview, interactive ROI selection, tracking configuration/execution through `scripts/shiny_bridge.py`, QC image/video review, trajectory and velocity plots, group summaries, downloads, and z-stack inventory. Python remains the analysis backend, not the final user interface.
+
+The Shiny app should use a multi-tab design that keeps distinct computational tasks separated.
 
 The interface should not present 2D velocity tracking and 3D thickness/depth analysis as one combined workflow. They use different data assumptions, different algorithms, and different validation requirements.
 
@@ -405,8 +405,8 @@ This is the main tab and the primary development focus.
 
 Purpose:
 
-- Track filament coordinates over time.
-- Calculate velocity over time.
+- Review bright actin landmark coordinates over time.
+- Display calibrated velocity over time.
 - Restrict the current workflow to the upper/central actin-rich tracking ROI from the `Picture1.jpg` biological-region interpretation.
 - Exclude the lower perinuclear/nucleus-adjacent region from computational tracking.
 - Support `.avi`, `.mp4`, and available `.tif`-derived 2D views/projections when appropriate.
@@ -418,7 +418,7 @@ Core controls:
 - movie/file selector
 - frame/timepoint selector
 - signal ROI detector with manual cutoff review
-- tracking method selector, initially placeholder if the backend is not implemented
+- tracking method selector, initially focused on bright-point / bright-region tracking
 - acquisition interval input, defaulting to lab-confirmed metadata rather than video playback FPS
 
 Core displays:
@@ -433,8 +433,8 @@ Core displays:
 
 Expected outputs:
 
-- cropped A/B images or frame products
-- coordinate CSV
+- cropped ROI images or frame products
+- bright-point coordinate CSV
 - track CSV
 - velocity CSV
 - preview overlays for QC
@@ -490,11 +490,11 @@ The dashboard should show:
 
 - number of conditions, samples, movies, extracted frames, and TIF stacks
 - raw-file status
-- annotation status
+- tracking validation status
 - warning that video export FPS is not acquisition timing
 - reminder that Tab 1 is the active milestone and Tab 2 is future work
 
-The Shiny frontend should start from `frames_index.csv` because it already provides a clean tabular bridge between files and metadata.
+The Shiny frontend can start from `frames_index.csv` for source-frame metadata, but its main data products should come from the validated tracking pipeline: point coordinates, tracks, velocity summaries, parameters, and QC overlays.
 
 ## Key Technical Risks
 
@@ -504,44 +504,63 @@ The Shiny frontend should start from `frames_index.csv` because it already provi
 
 3. **The current dataset has only 15 source movies.** Even though there are 150 extracted PNG frames, these are highly correlated within movie. Effective independent sample count is closer to the number of source movies/cells than the number of extracted frames.
 
-4. **Actin cable annotation is unresolved.** Dense meshwork may not support one-polygon-per-cable annotation. The lab needs to decide whether to label discrete cables only, introduce meshwork/perinuclear classes, or defer cable segmentation until better raw data arrives.
+4. **AI annotation/training is not the current path.** Dense meshwork made per-cable annotation difficult, and the lab direction is now to refine an explainable traditional CV tracker first.
 
 5. **Tracking ROI logic must be signal-driven.** A blind display-panel crop would destroy valid data. The current crop should follow actin foreground and the transition into the lower perinuclear region.
 
 6. **TIF workflows must preserve bit depth.** Converting 16-bit TIF stacks to 8-bit PNG is fine for display and some annotation workflows, but quantitative analysis should preserve original 16-bit intensities.
 
-7. **2D and 3D modules must stay decoupled.** The first milestone is 2D coordinate tracking and velocity. Thickness and depth-profile metrics are future 3D work and should not complicate the first tracking pipeline.
+7. **2D and 3D modules must stay decoupled.** The first milestone is 2D bright-point coordinate tracking and calibrated velocity. Thickness and depth-profile metrics are future 3D work and should not complicate the first tracking pipeline.
 
 8. **Repository hygiene needs cleanup.** The repo contains local environment files, data, frames, and Mac `.DS_Store` files. `.gitignore` now excludes many of these categories, but tracked state should be checked before sharing or committing.
 
+9. **Bright-point tracking needs validation.** The method is simple and explainable, but it can fail on saturation, flicker, dense regions, duplicate points, or local maxima that do not represent persistent actin landmarks.
+
 ## Immediate Next Steps
 
-1. **Confirm raw data status.**
+1. **Review the pushed traditional CV implementation.**
+   - Confirm where the bright-point tracker lives in the app.
+   - Check that it tracks the top 10 points or grouped bright regions from the first frame.
+   - Check that each next-frame search is local to the previous positions.
+   - Check that velocity uses absolute displacement/change and can be calibrated.
+
+2. **Build a small validation set.**
+   - Run the tracker on representative WT and mutant movies.
+   - Save overlays for every frame showing point IDs, matched positions, and local search neighborhoods.
+   - Manually inspect failures before changing parameters.
+
+3. **Add focused tests and fixtures.**
+   - Synthetic movie with known point displacement.
+   - Synthetic movie with two nearby bright points to test duplicate/merge behavior.
+   - Movie with a missing/flickering point to test track loss handling.
+   - Calibration test converting pixels/frame to microns/sec or microns/min.
+
+4. **Confirm raw data and calibration status.**
    - Ask for raw microscope files for all movie exports.
    - Ask for pixel size, Z-step, and true acquisition interval.
    - Ask whether `3_Mutant_515/03_676-6-3.mp4` and `04_676-6-3.mp4` are intentional duplicate replicate IDs.
 
-2. **Write/refine the biological tracking-ROI crop script.**
+5. **Write/refine the biological tracking-ROI crop script.**
    - Start with `.avi`, `.mp4`, and previewable `.tif` support.
    - Detect the upper/central actin tracking ROI from signal gradients.
    - Exclude the lower perinuclear/nucleus-adjacent region.
 
-3. **Define and prototype the 2D tracking pipeline.**
-   - Decide how filament coordinates will be detected in the tracking ROI.
-   - Confirm the acquisition interval for velocity calculations.
-   - Produce coordinate, track, and velocity CSV outputs.
+6. **Produce coordinate, track, and velocity outputs.**
+   - Point coordinate CSV.
+   - Track CSV.
+   - Velocity summary CSV.
+   - QC overlay image/video outputs.
 
-4. **Create an R Shiny frontend scaffold.**
-   - Use `frames_index.csv` as initial data source.
-   - Build Tab 1 for 2D Tracking as the main interface.
-   - Build Tab 2 for 3D Analysis as a future-milestone placeholder.
-   - Keep backend computation minimal until the tracking method and A/B definitions are settled.
+7. **Continue validating and extending the R Shiny app.**
+   - Test ROI selection and tracking on representative files from every group.
+   - Add run acceptance/rejection and batch execution after single-run behavior is validated.
+   - Keep the Python/OpenCV code behind the narrow Shiny bridge rather than exposing the PyQt prototype as the final deliverable.
 
-5. **Clarify annotation policy with the lab.**
-   - Decide whether to annotate actin as discrete cables, meshwork, perinuclear structure, or defer actin labels.
-   - Copy the annotation SOP into this repository if it should become part of the project record.
+8. **Keep AI models as optional future comparisons.**
+   - DINOv3 can be investigated later as a possible general-purpose model.
+   - Do not make DINOv3 or any learned model part of the active pipeline until the traditional CV baseline has been tested.
 
-6. **Add reproducibility files.**
+9. **Add reproducibility files.**
    - Create `requirements.txt` or `environment.yml`.
    - Add a small script or notebook for TIF inspection.
    - Document how to run preprocessing from a clean checkout.
@@ -555,13 +574,14 @@ ActinTrackCV should not be built as a single monolithic "segment actin" script. 
    - metadata manifest
    - crop/channel handling
 
-2. **Annotation and model training**
-   - Roboflow for 2D masks
-   - napari or 3D tooling for stacks
-   - careful SOP-driven annotation
+2. **Traditional CV tracking and validation**
+   - bright-point or bright-region detection
+   - local frame-to-frame matching
+   - QC overlays for every track
+   - synthetic and real-data tests
 
 3. **Quantification**
-   - filament coordinates
+   - bright-point coordinates
    - tracks
    - velocity over time
    - A/B comparisons

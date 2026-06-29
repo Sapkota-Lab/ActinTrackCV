@@ -40,6 +40,10 @@ venv/
 /actintrackcv_icon_exports/
 /actintrackcv_icons_transparent/
 
+# Runtime workspace metadata accidentally created inside the local z-stack import
+/20260608_WT_Z stacks/metadata/
+/20260608_WT_Z stacks/raw/
+
 # Microscopy / media (local copies; not repo fixtures)
 *.tif
 *.tiff

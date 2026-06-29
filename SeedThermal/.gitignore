@@ -1,0 +1,12 @@
+# SeedThermal local outputs
+processed/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# FLIR captures (keep outside git)
+input/
+*.jpg
+*.jpeg
+*.mp4

@@ -1,8 +1,37 @@
 # ActinTrackCV
 
-Desktop app for **ROI-level / sample-level F-actin movement analysis** in 2D **Arabidopsis** fluorescence time-lapse **Data**. Organize Data by **Breed** and **Sample**, orient frames, draw a rectangular **ROI**, review motion metrics in **Metric Analysis View**, and aggregate saved results in **Analysis**.
+Desktop app for **Arabidopsis** reproductive-cell fluorescence microscopy: 2D time-lapse movies of elongated ovule / embryo-sac cells expressing **Lifeact** (F-actin) and **H2B** (nucleus) reporters. Organize **Data** by **Breed** and **Sample**, orient frames, draw a rectangular **ROI**, review motion metrics in **Metric Analysis View** (template tracking and optical flow), and aggregate saved results in **Analysis**. The **R Shiny** app (`shiny_app/`) provides the lab-facing review workflow; Python remains the analysis backend.
 
-**Active import formats:** AVI and MP4 only. Image sequences and 3D/raw microscopy formats are postponed.
+**Experimental design (current dataset):** WT lines **218** and **550** (`FWApro::Lifeact-Venus` with H2B reporters) versus mutants **515** (`scar2` on #218) and **175** (`xig` on #218).
+
+Current analysis direction: refine a traditional computer-vision tracker before using AI model training. The working method tracks the brightest actin points or small bright regions from the first frame, searches locally for corresponding bright points in each next frame, and converts calibrated frame-to-frame displacement into velocity.
+
+Numerical tracker validation is documented in [`docs/TRACKER_VALIDATION_PROTOCOL.md`](docs/TRACKER_VALIDATION_PROTOCOL.md). Run the automated synthetic ground-truth gate with `.venv/bin/python scripts/validate_tracker.py`.
+
+The current Python desktop app is a research prototype/workbench. The final user-facing application target is **R Shiny**, with the Python/OpenCV analysis code producing stable CSV/JSON/QC outputs for Shiny to display.
+
+For a plain-language record of the project direction changes, see [`PROJECT_CHANGES_NATURAL_LANGUAGE.md`](PROJECT_CHANGES_NATURAL_LANGUAGE.md).
+
+**Active Python workbench import formats:** AVI and MP4 only. Image sequences and 3D/raw microscopy analysis are postponed.
+
+## Current dataset (`raw/`)
+
+Local workspace data under `raw/` (gitignored) currently holds **21 media files** in four breed folders:
+
+| Folder | Files | Formats |
+|--------|------:|---------|
+| `1_WT_218` | 7 | 2× TIFF, 1× AVI, 1× JPG montage, 3× OIR |
+| `2_WT_550` | 5 | 5× AVI |
+| `3_Mutant_515` | 5 | 1× AVI, 4× MP4 |
+| `4_Mutant_175` | 4 | 4× AVI |
+
+**Naming:** `{WT\|MUT}{id}_{0001..}.{ext}` inside `{ordinal}_{WT\|Mutant}_{id}/` (e.g. `2_WT_550/WT550_0003.avi`).
+
+**Time-lapse exports:** 15 videos, each **15 frames** at **6.0 fps playback** (export timing — lab notes say **30 sec/frame** for biological interval).
+
+**Higher-fidelity microscopy (`1_WT_218` only):** 16-bit ImageJ TIFF hyperstacks and Olympus **FV3000** OIR Z-stacks (60× water objective, EYFP/Lifeact channel).
+
+Legacy manifests such as `frames_index.csv` and the `raw_source/` archive use older filenames (`01.avi`, `03.avi`, etc.) that refer to the same movies.
 
 ## Download for macOS
 
@@ -79,6 +108,20 @@ python -m actintrack_app.main
 ```
 
 The launchers activate `.venv` or `venv` automatically when present.
+
+## Run the R Shiny app
+
+Install the R interface packages once, then run the application from the project root:
+
+```r
+install.packages(c(
+  "shiny", "bslib", "ggplot2", "jsonlite", "png",
+  "base64enc", "htmltools", "fontawesome"
+))
+shiny::runApp("shiny_app")
+```
+
+The Shiny app discovers source videos, supports interactive ROI selection, runs the traditional CV tracker, reviews QC outputs, compares completed runs, and inventories local z-stack files. See [`shiny_app/README.md`](shiny_app/README.md) for details.
 
 ## Terminology
 
@@ -174,9 +217,9 @@ The app creates these folders inside your workspace as you work:
 
 ```text
 ActinTrackCV/                    ← project root (workspace)
-  raw/                           ← optional internal copies of imported Data
-    <breed>/
-      <sample_id>.avi
+  raw/                           ← source media and optional internal import copies
+    <breed>/                     e.g. 2_WT_550/
+      <PREFIX>_<NNNN>.<ext>      e.g. WT550_0003.avi
   processed/                     ← cropped exports and motion-index outputs
   metadata/                      ← runtime registry and annotations
     data_files.csv
@@ -261,3 +304,7 @@ The build is **unsigned** (SmartScreen warns; More info → Run anyway). An inst
 - `python -m actintrack_app.main` — same GUI as `run_app.py`
 
 See `PROJECT_OVERVIEW.md` for broader project context.
+
+## Related: SeedThermal (separate project)
+
+FLIR ONE Edge seed thermal phenotyping lives in **[`SeedThermal/`](SeedThermal/README.md)** — independent install, scripts, and outputs. It is not part of the ActinTrackCV microscopy or F-actin tracking pipeline.

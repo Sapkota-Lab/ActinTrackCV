@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-# Biological groups / sample folders currently present in ActinTrackCV.
+# Biological groups / WT and mutant line folders in the current dataset.
 GROUP_WT_218 = "1_WT_218"
 GROUP_WT_550 = "2_WT_550"
 GROUP_MUTANT_515 = "3_Mutant_515"

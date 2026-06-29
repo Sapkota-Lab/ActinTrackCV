@@ -1,4 +1,4 @@
-"""PyQt6 GUI — 2D Arabidopsis F-actin preprocessing and ROI annotation."""
+"""PyQt6 GUI — Arabidopsis reproductive-cell F-actin preprocessing and ROI annotation."""
 
 from __future__ import annotations
 
@@ -123,7 +123,11 @@ from actintrack_app.project_manager import (
     get_processed_batch_dir,
     is_valid_project,
 )
-from actintrack_app.motion_index import MotionIndexParams
+from actintrack_app.motion_index import (
+    MotionIndexParams,
+    TRACKING_METHOD_BRIGHTEST_LOCAL,
+    TRACKING_METHOD_TEMPLATE,
+)
 from actintrack_app.optical_flow_motion_index import (
     OpticalFlowResult,
     OpticalFlowSettings,
@@ -361,7 +365,7 @@ class PropagateDialog(QDialog):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("ActinTrackCV — 2D Arabidopsis F-actin Preprocessing")
+        self.setWindowTitle("ActinTrackCV — Arabidopsis F-actin Tracking Workbench")
         self.resize(1280, 720)
         self.setMinimumSize(960, 600)
 
@@ -640,7 +644,7 @@ class MainWindow(QMainWindow):
         return stack
 
     def _build_samples_panel(self) -> QGroupBox:
-        box = QGroupBox("Arabidopsis samples")
+        box = QGroupBox("Samples (WT / Mutant lines)")
         layout = QVBoxLayout(box)
         self.lbl_workspace = QLabel("Workspace: —")
         self.lbl_workspace.setWordWrap(True)
@@ -807,6 +811,19 @@ class MainWindow(QMainWindow):
 
     def _create_tracking_setting_widgets(self) -> None:
         defaults = MotionIndexParams()
+        self.combo_track_method = QComboBox()
+        self.combo_track_method.addItem(
+            "Brightest nearby points",
+            TRACKING_METHOD_BRIGHTEST_LOCAL,
+        )
+        self.combo_track_method.addItem("Template matching", TRACKING_METHOD_TEMPLATE)
+        method_index = self.combo_track_method.findData(defaults.tracking_method)
+        self.combo_track_method.setCurrentIndex(max(0, method_index))
+        self.combo_track_method.setToolTip(
+            "How each point is matched in the next frame. Brightest nearby points "
+            "matches Dr. Ju's recommended traditional CV method."
+        )
+
         self.spin_track_points = QSpinBox()
         self.spin_track_points.setRange(1, 50)
         self.spin_track_points.setValue(defaults.num_starting_points)
@@ -833,7 +850,8 @@ class MainWindow(QMainWindow):
         self.spin_track_patch.setSingleStep(2)
         self.spin_track_patch.setValue(defaults.template_patch_size_px)
         self.spin_track_patch.setToolTip(
-            "Size of the square image patch used for template matching. Must be odd."
+            "Size of the local bright-region centroid patch, and template patch "
+            "when template matching is selected. Must be odd."
         )
 
         self.spin_track_confidence = QDoubleSpinBox()
@@ -842,7 +860,8 @@ class MainWindow(QMainWindow):
         self.spin_track_confidence.setSingleStep(0.05)
         self.spin_track_confidence.setValue(defaults.min_template_confidence)
         self.spin_track_confidence.setToolTip(
-            "Lowest accepted template-matching score."
+            "Lowest accepted match score. For brightest-point tracking this is a "
+            "normalized local brightness threshold."
         )
 
         self.spin_track_lookahead = QSpinBox()
@@ -870,6 +889,7 @@ class MainWindow(QMainWindow):
         )
 
         self._tracking_setting_widgets = (
+            self.combo_track_method,
             self.spin_track_points,
             self.spin_track_spacing,
             self.spin_track_search,
@@ -883,6 +903,8 @@ class MainWindow(QMainWindow):
             self._configure_tracking_field(widget, full_column=True)
             if isinstance(widget, (QSpinBox, QDoubleSpinBox)):
                 widget.valueChanged.connect(self._on_tracking_setting_changed)
+            elif isinstance(widget, QComboBox):
+                widget.currentIndexChanged.connect(self._on_tracking_setting_changed)
 
     @staticmethod
     def _add_tracking_setting_row(
@@ -907,6 +929,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(10)
         layout.setContentsMargins(8, 12, 8, 8)
         rows: list[tuple[str, QWidget, str]] = [
+            ("Tracking Method", self.combo_track_method, self.combo_track_method.toolTip()),
             ("Starting Points", self.spin_track_points, self.spin_track_points.toolTip()),
             (
                 "Minimum Point Spacing (px)",
@@ -2011,7 +2034,12 @@ class MainWindow(QMainWindow):
         return SampleTrackingResultView(
             status="success",
             downward_velocity=float(data.get("downward_velocity_index_um_per_s", 0.0)),
-            general_movement=float(data.get("general_movement_index_um_per_s", 0.0)),
+            general_movement=float(
+                data.get(
+                    "absolute_velocity_index_um_per_s",
+                    data.get("general_movement_index_um_per_s", 0.0),
+                )
+            ),
             tracks_used=tracks_used,
             tracks_requested=max(tracks_started, tracks_used),
             valid_steps=int(data.get("total_valid_steps", 0) or 0),
@@ -2099,8 +2127,8 @@ class MainWindow(QMainWindow):
                 )
             lines.extend(
                 [
+                    f"Absolute Velocity: {template_view.general_movement:.4f} µm/s",
                     f"Downward Velocity: {template_view.downward_velocity:.4f} µm/s",
-                    f"General Movement: {template_view.general_movement:.4f} µm/s",
                     tracks_line,
                     f"Valid Steps: {template_view.valid_steps}",
                 ]
@@ -2174,7 +2202,22 @@ class MainWindow(QMainWindow):
         payload = {
             "data_id": sample_id,
             "sample_id": sample_id,
+            "primary_velocity_metric": "absolute_velocity_index_um_per_s",
+            "primary_velocity_index_um_per_s": analysis.general_movement_index_um_per_s,
+            "absolute_velocity_index_um_per_s": analysis.general_movement_index_um_per_s,
             "downward_velocity_index_um_per_s": analysis.downward_velocity_index_um_per_s,
+            "downward_velocity_index_definition": (
+                "mean(dy/dt | dy > 0); increasing image y is downward"
+            ),
+            "time_weighted_mean_speed_um_per_s": (
+                analysis.time_weighted_mean_speed_um_per_s
+            ),
+            "signed_vertical_velocity_um_per_s": (
+                analysis.signed_vertical_velocity_um_per_s
+            ),
+            "downward_velocity_contribution_um_per_s": (
+                analysis.downward_velocity_contribution_um_per_s
+            ),
             "general_movement_index_um_per_s": analysis.general_movement_index_um_per_s,
             "num_tracks_with_valid_steps": analysis.num_tracks_with_valid_steps,
             "num_tracks_started": analysis.num_tracks_started,
@@ -2717,6 +2760,9 @@ class MainWindow(QMainWindow):
             microns_per_pixel=float(self.spin_track_mpp.value()),
             seconds_per_frame=float(self.spin_track_spf.value()),
             downward_direction="increasing_y",
+            tracking_method=str(
+                self.combo_track_method.currentData() or TRACKING_METHOD_BRIGHTEST_LOCAL
+            ),
         )
 
     def _on_show_metric_analysis_view(self) -> None:
@@ -4764,8 +4810,9 @@ class MainWindow(QMainWindow):
             self,
             "About ActinTrackCV",
             f"ActinTrackCV {__version__}\n\n"
-            "ActinTrackCV — Arabidopsis F-actin fluorescence microscopy: 2D preprocessing, "
-            "orientation, ROI annotation, and cropped export for actin cable analysis.\n\n"
+            "ActinTrackCV — Arabidopsis reproductive-cell F-actin fluorescence microscopy: "
+            "2D time-lapse preprocessing, orientation, ROI selection, template tracking, "
+            "optical-flow motion index, and cropped export for actin cable velocity analysis.\n\n"
             "Suggest ROI from F-actin Signal is a computer vision helper that looks for areas "
             "in the image where bright, filament-like F-actin signal is strongest or most "
             "structured. It proposes a rectangular ROI that may contain usable actin cables "

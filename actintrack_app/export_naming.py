@@ -114,6 +114,10 @@ def motion_index_track_preview_path(batch_dir: Path, final_name: str) -> Path:
     return batch_dir / f"{final_name}_track_preview.mp4"
 
 
+def motion_index_track_preview_webm_path(batch_dir: Path, final_name: str) -> Path:
+    return batch_dir / f"{final_name}_track_preview.webm"
+
+
 def motion_index_output_paths(batch_dir: Path, final_name: str) -> dict[str, Path]:
     return {
         "trajectory_csv": motion_index_trajectory_csv_path(batch_dir, final_name),
@@ -121,4 +125,7 @@ def motion_index_output_paths(batch_dir: Path, final_name: str) -> dict[str, Pat
         "starting_points": motion_index_starting_points_path(batch_dir, final_name),
         "track_overlay": motion_index_track_overlay_path(batch_dir, final_name),
         "track_preview": motion_index_track_preview_path(batch_dir, final_name),
+        "track_preview_webm": motion_index_track_preview_webm_path(
+            batch_dir, final_name
+        ),
     }

@@ -1,0 +1,20 @@
+{
+  "reference_roi": {
+    "id": "paper",
+    "x": 50,
+    "y": 50,
+    "w": 80,
+    "h": 80,
+    "label": "filter_paper_reference"
+  },
+  "rois": [
+    {
+      "id": "frame",
+      "x": 0,
+      "y": 0,
+      "width": 480,
+      "height": 640,
+      "label": "full_frame"
+    }
+  ]
+}

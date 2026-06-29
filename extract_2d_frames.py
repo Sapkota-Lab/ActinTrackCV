@@ -2,7 +2,7 @@
 extract_2d_frames.py
 Extract evenly-sampled PNG frames from all AVI/MP4 movies in the ActinTrackCV
 raw dataset, write them into an organized folder tree, and produce a
-frames_index.csv manifest for downstream tagging in Roboflow.
+frames_index.csv manifest for downstream tracking, QC, and provenance.
 
 Requirements:
     pip install opencv-python pandas tqdm

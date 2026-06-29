@@ -13,6 +13,7 @@ from actintrack_app.motion_index import (
     PointTrack,
     compute_motion_indices,
     compute_track_statistics,
+    compute_velocity_summary,
     render_track_preview_frame,
     select_starting_points,
     track_points,
@@ -32,6 +33,9 @@ class CroppedPreviewAnalysis:
     num_tracks_with_valid_steps: int
     total_valid_steps: int
     mean_track_length_frames: float
+    time_weighted_mean_speed_um_per_s: float = 0.0
+    signed_vertical_velocity_um_per_s: float = 0.0
+    downward_velocity_contribution_um_per_s: float = 0.0
     tracking_warning: str = ""
     params: MotionIndexParams | None = None
 
@@ -81,7 +85,7 @@ def analyze_cropped_preview(
     *,
     params: MotionIndexParams | None = None,
 ) -> CroppedPreviewAnalysis:
-    """Run draft template-matching motion index on in-memory cropped frames."""
+    """Run draft motion-index tracking on in-memory cropped frames."""
     params = params or MotionIndexParams()
     if len(frames) < 2:
         raise ValueError("Need at least 2 cropped frames for tracking preview.")
@@ -144,6 +148,7 @@ def analyze_cropped_preview(
         )
 
     downward, general, _ = compute_motion_indices(tracks, params)
+    velocity_summary = compute_velocity_summary(tracks, params)
     return CroppedPreviewAnalysis(
         frames=frames,
         tracks=tracks,
@@ -153,6 +158,15 @@ def analyze_cropped_preview(
         num_tracks_with_valid_steps=valid_tracks,
         total_valid_steps=total_steps,
         mean_track_length_frames=mean_len,
+        time_weighted_mean_speed_um_per_s=(
+            velocity_summary.time_weighted_mean_speed_um_per_s
+        ),
+        signed_vertical_velocity_um_per_s=(
+            velocity_summary.signed_vertical_velocity_um_per_s
+        ),
+        downward_velocity_contribution_um_per_s=(
+            velocity_summary.downward_velocity_contribution_um_per_s
+        ),
         tracking_warning=warning,
         params=params,
     )
