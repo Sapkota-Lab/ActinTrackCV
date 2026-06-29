@@ -79,6 +79,28 @@ Required material: a stable fluorescent bead slide or fixed fluorescent specimen
 
 Do not pass this layer unless its limits of agreement fit inside the lab-approved biological error tolerance.
 
+### Running Layer 2 analysis
+
+1. Record bead-slide movies with the stage (include zero-motion control and ≥5 translations per axis as above).
+2. Copy `examples/layer2_stage_calibration.manifest.example.json` and set `source_path`, commanded µm/frame, and **independently measured** `independent_microns_per_pixel`.
+3. Run analysis and agreement statistics:
+
+```bash
+.venv/bin/python scripts/validate_stage_calibration.py \
+  --manifest path/to/your_manifest.json \
+  --output-dir outputs/stage_calibration_validation
+```
+
+Reports are written as `stage_calibration_report.json` and `stage_calibration_recordings.csv` under the output directory. Review signed bias, MAE, RMSE, and 95% limits of agreement for X and Y.
+
+### Synthetic Layer 2 gate (CI / smoke test)
+
+```bash
+.venv/bin/python scripts/validate_stage_calibration.py --synthetic
+```
+
+This uses affine synthetic bead movies with known commanded translation. It does **not** replace real microscope bead-slide validation.
+
 ## Layer 3: real F-actin agreement
 
 1. Preselect representative movies before viewing tracker results. Include low/high signal, sparse/dense landmarks, bleaching, and expected slow/fast motion.

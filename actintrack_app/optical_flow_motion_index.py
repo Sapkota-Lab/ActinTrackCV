@@ -57,6 +57,7 @@ class FramePairSummary:
     saturated_pixel_fraction: float
     mean_magnitude_px_frame: float
     mean_downward_px_frame: float
+    mean_net_x_px_frame: float
     mean_net_y_px_frame: float
 
 
@@ -74,6 +75,7 @@ class OpticalFlowResult:
     optical_flow_saturated_pixel_fraction: Optional[float] = None
     mean_magnitude_px_frame: Optional[float] = None
     mean_downward_px_frame: Optional[float] = None
+    mean_net_x_px_frame: Optional[float] = None
     mean_net_y_px_frame: Optional[float] = None
     frame_count: int = 0
     frame_pair_count: int = 0
@@ -106,6 +108,7 @@ class OpticalFlowResult:
             "optical_flow_saturated_pixel_fraction": self.optical_flow_saturated_pixel_fraction,
             "mean_magnitude_px_frame": self.mean_magnitude_px_frame,
             "mean_downward_px_frame": self.mean_downward_px_frame,
+            "mean_net_x_px_frame": self.mean_net_x_px_frame,
             "mean_net_y_px_frame": self.mean_net_y_px_frame,
             "frame_pair_summaries": [asdict(s) for s in self.frame_pair_summaries],
         }
@@ -252,6 +255,7 @@ def compute_optical_flow_motion_index(
     pair_summaries: list[FramePairSummary] = []
     mag_values: list[float] = []
     downward_values: list[float] = []
+    net_x_values: list[float] = []
     net_y_values: list[float] = []
     valid_fractions: list[float] = []
     saturated_fractions: list[float] = []
@@ -269,11 +273,13 @@ def compute_optical_flow_motion_index(
             continue
 
         flow_y = flow[..., 1]
-        magnitude = np.sqrt(flow[..., 0] ** 2 + flow_y ** 2)
+        flow_x = flow[..., 0]
+        magnitude = np.sqrt(flow_x ** 2 + flow_y ** 2)
         downward = np.maximum(flow_y, 0.0)
 
         mag_mean = float(np.mean(magnitude[mask]))
         down_mean = float(np.mean(downward[mask]))
+        net_x_mean = float(np.mean(flow_x[mask]))
         net_y_mean = float(np.mean(flow_y[mask]))
         valid_fraction = valid_count / total_pixels
         sat_fraction = float(np.count_nonzero(_saturated_mask(prev_gray) & mask)) / total_pixels
@@ -287,11 +293,13 @@ def compute_optical_flow_motion_index(
                 saturated_pixel_fraction=sat_fraction,
                 mean_magnitude_px_frame=mag_mean,
                 mean_downward_px_frame=down_mean,
+                mean_net_x_px_frame=net_x_mean,
                 mean_net_y_px_frame=net_y_mean,
             )
         )
         mag_values.append(mag_mean)
         downward_values.append(down_mean)
+        net_x_values.append(net_x_mean)
         net_y_values.append(net_y_mean)
         valid_fractions.append(valid_fraction)
         saturated_fractions.append(sat_fraction)
@@ -309,6 +317,7 @@ def compute_optical_flow_motion_index(
 
     mean_mag_px = float(np.mean(mag_values))
     mean_down_px = float(np.mean(downward_values))
+    mean_net_x_px = float(np.mean(net_x_values))
     mean_net_y_px = float(np.mean(net_y_values))
     general_um_s = _px_per_frame_to_um_per_s(mean_mag_px, settings)
     downward_um_s = _px_per_frame_to_um_per_s(mean_down_px, settings)
@@ -327,6 +336,7 @@ def compute_optical_flow_motion_index(
         optical_flow_saturated_pixel_fraction=float(np.mean(saturated_fractions)),
         mean_magnitude_px_frame=mean_mag_px,
         mean_downward_px_frame=mean_down_px,
+        mean_net_x_px_frame=mean_net_x_px,
         mean_net_y_px_frame=mean_net_y_px,
         frame_count=len(frames),
         frame_pair_count=len(pair_summaries),
@@ -404,6 +414,7 @@ def result_from_dict(data: dict[str, Any]) -> OpticalFlowResult:
         ),
         mean_magnitude_px_frame=_optional_float(data.get("mean_magnitude_px_frame")),
         mean_downward_px_frame=_optional_float(data.get("mean_downward_px_frame")),
+        mean_net_x_px_frame=_optional_float(data.get("mean_net_x_px_frame")),
         mean_net_y_px_frame=_optional_float(data.get("mean_net_y_px_frame")),
         frame_count=int(data.get("frame_count", 0) or 0),
         frame_pair_count=int(data.get("frame_pair_count", 0) or 0),

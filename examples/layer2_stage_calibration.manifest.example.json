@@ -1,0 +1,84 @@
+{
+  "protocol_version": 1,
+  "independent_microns_per_pixel": 0.265,
+  "seconds_per_frame": 30.0,
+  "lab_approved_tolerance_um_per_frame": 0.5,
+  "analysis": {
+    "analysis_method": "landmark_tracking",
+    "tracking_method": "brightest_local",
+    "num_starting_points": 5,
+    "min_point_spacing_px": 20,
+    "search_radius_px": 8,
+    "template_patch_size_px": 11,
+    "min_template_confidence": 0.55,
+    "lookahead_frames": 0
+  },
+  "sessions": [
+    {
+      "session_id": "2026-07-01_session1",
+      "notes": "Replace source_path values with your bead-slide AVI/MP4 exports. Commanded values are per-frame translation in microns.",
+      "recordings": [
+        {
+          "recording_id": "zero_motion",
+          "direction": "zero",
+          "source_path": "raw/calibration/session1/zero_motion.avi",
+          "commanded_dx_um_per_frame": 0.0,
+          "commanded_dy_um_per_frame": 0.0,
+          "roi": { "x": 0, "y": 0, "width": 0, "height": 0 },
+          "rotation": 0,
+          "flip_horizontal": false
+        },
+        {
+          "recording_id": "x_pos_05um",
+          "direction": "x_positive",
+          "source_path": "raw/calibration/session1/x_pos_05um.avi",
+          "commanded_dx_um_per_frame": 0.5,
+          "commanded_dy_um_per_frame": 0.0,
+          "roi": { "x": 0, "y": 0, "width": 0, "height": 0 },
+          "rotation": 0,
+          "flip_horizontal": false
+        },
+        {
+          "recording_id": "x_pos_20um",
+          "direction": "x_positive",
+          "source_path": "raw/calibration/session1/x_pos_20um.avi",
+          "commanded_dx_um_per_frame": 2.0,
+          "commanded_dy_um_per_frame": 0.0,
+          "roi": { "x": 0, "y": 0, "width": 0, "height": 0 },
+          "rotation": 0,
+          "flip_horizontal": false
+        },
+        {
+          "recording_id": "x_neg_10um",
+          "direction": "x_negative",
+          "source_path": "raw/calibration/session1/x_neg_10um.avi",
+          "commanded_dx_um_per_frame": -1.0,
+          "commanded_dy_um_per_frame": 0.0,
+          "roi": { "x": 0, "y": 0, "width": 0, "height": 0 },
+          "rotation": 0,
+          "flip_horizontal": false
+        },
+        {
+          "recording_id": "y_pos_08um",
+          "direction": "y_positive",
+          "source_path": "raw/calibration/session1/y_pos_08um.avi",
+          "commanded_dx_um_per_frame": 0.0,
+          "commanded_dy_um_per_frame": 0.8,
+          "roi": { "x": 0, "y": 0, "width": 0, "height": 0 },
+          "rotation": 0,
+          "flip_horizontal": false
+        },
+        {
+          "recording_id": "y_neg_06um",
+          "direction": "y_negative",
+          "source_path": "raw/calibration/session1/y_neg_06um.avi",
+          "commanded_dx_um_per_frame": 0.0,
+          "commanded_dy_um_per_frame": -0.6,
+          "roi": { "x": 0, "y": 0, "width": 0, "height": 0 },
+          "rotation": 0,
+          "flip_horizontal": false
+        }
+      ]
+    }
+  ]
+}

@@ -103,6 +103,7 @@ Before reporting biological comparisons, run Layer 1 synthetic gates from the pr
 ```bash
 .venv/bin/python scripts/validate_tracker.py
 .venv/bin/python scripts/validate_optical_flow.py
+.venv/bin/python scripts/validate_stage_calibration.py --synthetic
 .venv/bin/python scripts/validate_shiny_workflow.py
 ```
 

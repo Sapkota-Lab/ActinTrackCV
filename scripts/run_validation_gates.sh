@@ -24,6 +24,9 @@ echo "==> Layer 1 — template tracking synthetic gate"
 echo "==> Layer 1 — optical flow synthetic gate"
 "$PYTHON" scripts/validate_optical_flow.py
 
+echo "==> Layer 2 — stage calibration synthetic gate"
+"$PYTHON" scripts/validate_stage_calibration.py --synthetic
+
 if command -v Rscript >/dev/null 2>&1; then
   echo "==> Shiny helper tests"
   Rscript tests/test_shiny_helpers.R

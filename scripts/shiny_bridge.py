@@ -329,6 +329,7 @@ def _write_flow_pair_csv(result: Any, path: Path) -> None:
         "saturated_pixel_fraction",
         "mean_magnitude_px_frame",
         "mean_downward_px_frame",
+        "mean_net_x_px_frame",
         "mean_net_y_px_frame",
     ]
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -345,6 +346,7 @@ def _write_flow_pair_csv(result: Any, path: Path) -> None:
                     "saturated_pixel_fraction": summary.saturated_pixel_fraction,
                     "mean_magnitude_px_frame": summary.mean_magnitude_px_frame,
                     "mean_downward_px_frame": summary.mean_downward_px_frame,
+                    "mean_net_x_px_frame": summary.mean_net_x_px_frame,
                     "mean_net_y_px_frame": summary.mean_net_y_px_frame,
                 }
             )

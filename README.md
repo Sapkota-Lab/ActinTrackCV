@@ -6,7 +6,7 @@ Desktop app for **Arabidopsis** reproductive-cell fluorescence microscopy: 2D ti
 
 Current analysis direction: refine a traditional computer-vision tracker before using AI model training. The working method tracks the brightest actin points or small bright regions from the first frame, searches locally for corresponding bright points in each next frame, and converts calibrated frame-to-frame displacement into velocity.
 
-Numerical tracker validation is documented in [`docs/TRACKER_VALIDATION_PROTOCOL.md`](docs/TRACKER_VALIDATION_PROTOCOL.md). Run the automated synthetic ground-truth gates locally with `scripts/run_validation_gates.sh`, or rely on the GitHub Actions workflow in [`.github/workflows/validation.yml`](.github/workflows/validation.yml) on push/PR to `main`.
+Numerical tracker validation is documented in [`docs/TRACKER_VALIDATION_PROTOCOL.md`](docs/TRACKER_VALIDATION_PROTOCOL.md). Run the automated synthetic ground-truth gates locally with `scripts/run_validation_gates.sh`, or rely on the GitHub Actions workflow in [`.github/workflows/validation.yml`](.github/workflows/validation.yml) on push/PR to `main`. For **Layer 2** bead-slide validation, use [`examples/layer2_stage_calibration.manifest.example.json`](examples/layer2_stage_calibration.manifest.example.json) with `scripts/validate_stage_calibration.py`.
 
 The current Python desktop app is a research prototype/workbench. The final user-facing application target is **R Shiny**, with the Python/OpenCV analysis code producing stable CSV/JSON/QC outputs for Shiny to display.
 

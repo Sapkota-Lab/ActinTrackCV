@@ -63,6 +63,9 @@ jobs:
       - name: Layer 1 — optical flow synthetic gate
         run: python scripts/validate_optical_flow.py
 
+      - name: Layer 2 — stage calibration synthetic gate
+        run: python scripts/validate_stage_calibration.py --synthetic
+
       - name: Set up R
         uses: r-lib/actions/setup-r@v2
         with:
@@ -85,5 +88,6 @@ jobs:
           path: |
             outputs/tracker_validation/
             outputs/optical_flow_validation/
+            outputs/stage_calibration_validation/
             outputs/shiny_workflow_validation.json
           if-no-files-found: ignore
