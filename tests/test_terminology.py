@@ -21,11 +21,19 @@ def _read(rel: str) -> str:
 class UserFacingTerminologyTests(unittest.TestCase):
     def test_gui_has_no_user_facing_breed_labels(self) -> None:
         src = _read("actintrack_app/gui.py")
-        # The left-panel selector and dialog text must not expose "Breed".
+        # The workspace tree and dialog text must not expose "Breed".
         self.assertNotIn('"Breed:"', src)
         self.assertNotIn("this Breed?", src)
-        self.assertIn('"Condition Group:"', src)
+        self.assertIn("Condition Group", src)
         self.assertIn("this Condition Group?", src)
+        self.assertIn("tree_samples", src)
+        self.assertNotIn("Full Sample Preview — orient the data", src)
+        self.assertNotIn('"◀ Prev"', src)
+        self.assertNotIn('"Next ▶"', src)
+        self.assertNotIn("btn_refresh_samples", src)
+        self.assertIn("Refresh Explorer", src)
+        self.assertIn("_LEFT_PANEL_MIN_WIDTH", src)
+        self.assertIn("setCollapsible", src)
 
     def test_analysis_view_headers_use_condition_group(self) -> None:
         src = _read("actintrack_app/analysis_view.py")

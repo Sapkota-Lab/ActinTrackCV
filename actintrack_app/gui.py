@@ -14,6 +14,7 @@ import pandas as pd
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QBrush, QColor, QIcon
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QCheckBox,
     QComboBox,
@@ -27,8 +28,6 @@ from PyQt6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
-    QListWidget,
-    QListWidgetItem,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -41,6 +40,8 @@ from PyQt6.QtWidgets import (
     QStatusBar,
     QTabWidget,
     QTextEdit,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QSizePolicy,
     QWidget,
@@ -93,6 +94,7 @@ from actintrack_app.metadata import (
     sync_samples_with_disk,
     update_samples_csv,
 )
+from actintrack_app.metric_display import render_metric_display_lines
 from actintrack_app.purge_cleanup_dialog import pick_empty_batch_name
 from actintrack_app.sample_service import (
     DATA_IMPORT_FILTER,
@@ -121,6 +123,17 @@ from actintrack_app.condition_group_manager import (
     list_condition_group_records,
     rename_condition_group,
     resolve_condition_group_id,
+)
+from actintrack_app.explorer_sidebar import (
+    ITEM_TYPE_CONDITION_GROUP,
+    ITEM_TYPE_EMPTY_SAMPLE,
+    ITEM_TYPE_SAMPLE,
+    condition_group_tree_meta,
+    empty_sample_sidebar_label,
+    empty_sample_tree_meta,
+    sample_sidebar_display_label,
+    sample_tree_meta,
+    tree_item_condition_group_id,
 )
 from actintrack_app.recent_workspaces import add_recent
 from actintrack_app.user_preferences import get_last_import_breed, set_last_import_breed
@@ -188,7 +201,6 @@ from actintrack_app.utils import (
     STATUS_ROI_PROPAGATED,
     STATUS_UNANNOTATED,
     SCOPE_SELECTED,
-    sample_status_label,
 )
 from actintrack_app.video_processing import MediaLoadError, load_media_frame
 from actintrack_app.debug_log import breadcrumb
@@ -217,6 +229,9 @@ def _app_qicon() -> Optional[QIcon]:
 AUTO_APPLY_ROI_CONFIDENCE = 0.15
 DRAFT_TRACKING_DIR = "draft_tracking"
 _METRIC_ANALYSIS_VIEW_LABEL = "Metric Analysis View"
+
+_LEFT_PANEL_MIN_WIDTH = 200
+_RIGHT_PANEL_MIN_WIDTH = 260
 
 _ADVANCED_SAMPLE_STATUSES = frozenset(
     {
@@ -439,6 +454,7 @@ class MainWindow(QMainWindow):
         self._metric_flush_timer.setInterval(150)
         self._metric_flush_timer.timeout.connect(self._on_metric_flush_timer)
 
+        self._splitter_sizes_before_analysis: list[int] | None = None
         self._build_ui()
         self._set_tracking_settings_editable(False)
         setup_application_menus(self)
@@ -449,15 +465,14 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         layout = QHBoxLayout(central)
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(self._build_left_sidebar())
+        self._left_sidebar = self._build_left_sidebar()
+        splitter.addWidget(self._left_sidebar)
         self._preview_page = QWidget()
         preview_page = self._preview_page
         center_layout = QVBoxLayout(preview_page)
-        self.lbl_preview_mode = QLabel(
-            "Full Sample Preview — orient the data and draw a rectangle around "
-            "the usable actin-rich region."
-        )
+        self.lbl_preview_mode = QLabel("")
         self.lbl_preview_mode.setWordWrap(True)
+        self.lbl_preview_mode.hide()
         center_layout.addWidget(self.lbl_preview_mode)
 
         metric_mode_row = QHBoxLayout()
@@ -502,11 +517,16 @@ class MainWindow(QMainWindow):
         preview_crop_row.addStretch()
         center_layout.addLayout(preview_crop_row)
 
-        self.lbl_metric_freshness = QLabel("Not analyzed yet")
-        self.lbl_metric_freshness.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        self.lbl_metric_freshness.setStyleSheet("color: #888; font-size: 11px;")
-        self.lbl_metric_freshness.hide()
-        center_layout.addWidget(self.lbl_metric_freshness)
+        self.lbl_metric_status = QLabel("Metric status: Not analyzed")
+        self.lbl_metric_status.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        self.lbl_metric_status.setStyleSheet("color: #888; font-size: 11px;")
+        self.lbl_metric_status.hide()
+        center_layout.addWidget(self.lbl_metric_status)
+        self.lbl_last_analyzed = QLabel("Last analyzed: —")
+        self.lbl_last_analyzed.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        self.lbl_last_analyzed.setStyleSheet("color: #888; font-size: 11px;")
+        self.lbl_last_analyzed.hide()
+        center_layout.addWidget(self.lbl_last_analyzed)
 
         preview_controls = QVBoxLayout()
         preview_controls.setSpacing(4)
@@ -577,19 +597,24 @@ class MainWindow(QMainWindow):
         self._center_stack = QStackedWidget()
         self._center_stack.addWidget(preview_page)
         self._center_stack.addWidget(self._analysis_view)
+        self._right_sidebar = self._build_right_sidebar()
         splitter.addWidget(self._center_stack)
-        splitter.addWidget(self._build_right_sidebar())
+        splitter.addWidget(self._right_sidebar)
         splitter.setSizes([260, 780, 260])
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setStretchFactor(2, 0)
+        splitter.setCollapsible(0, False)
+        splitter.setCollapsible(1, False)
+        splitter.setCollapsible(2, False)
+        self._main_splitter = splitter
         layout.addWidget(splitter)
         self.setStatusBar(QStatusBar())
 
     def _build_left_sidebar(self) -> QWidget:
-        """Sample list and view filters (import/setup is in the menu bar)."""
+        """Explorer sidebar (import/setup is in the menu bar)."""
         panel = QWidget()
-        panel.setMinimumWidth(260)
+        panel.setMinimumWidth(_LEFT_PANEL_MIN_WIDTH)
         panel.setMaximumWidth(360)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(6, 6, 6, 6)
@@ -599,7 +624,7 @@ class MainWindow(QMainWindow):
     def _build_right_sidebar(self) -> QStackedWidget:
         """Normal tabbed controls, or full-column Advanced Tracking Settings."""
         stack = QStackedWidget()
-        stack.setMinimumWidth(260)
+        stack.setMinimumWidth(_RIGHT_PANEL_MIN_WIDTH)
         stack.setMaximumWidth(380)
 
         self._right_tabs = QTabWidget()
@@ -653,77 +678,44 @@ class MainWindow(QMainWindow):
         self._right_stack = stack
         return stack
 
-    def _build_samples_panel(self) -> QGroupBox:
-        box = QGroupBox("Samples")
-        layout = QVBoxLayout(box)
+    def _build_samples_panel(self) -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
         self.lbl_workspace = QLabel("Workspace: —")
         self.lbl_workspace.setWordWrap(True)
         self.lbl_workspace.setStyleSheet("color: #888; font-size: 11px;")
         layout.addWidget(self.lbl_workspace)
         self.combo_filter_group = QComboBox()
-        self.combo_filter_group.currentTextChanged.connect(self._on_filter_group_changed)
-        layout.addWidget(QLabel("Condition Group:"))
-        layout.addWidget(self.combo_filter_group)
-        cg_row = QHBoxLayout()
-        self.btn_new_condition_group = self._tool_button(
-            "New Group",
-            "Create a custom Condition Group for this workspace.",
-            self._on_create_condition_group,
+        self.combo_filter_group.setVisible(False)
+        self.lbl_explorer_empty = QLabel("Create a Condition Group to begin.")
+        self.lbl_explorer_empty.setWordWrap(True)
+        self.lbl_explorer_empty.setStyleSheet("color: #aaaaaa; font-size: 11px;")
+        self.lbl_explorer_empty.setVisible(False)
+        layout.addWidget(self.lbl_explorer_empty)
+        self.tree_samples = QTreeWidget()
+        self.tree_samples.setHeaderHidden(True)
+        self.tree_samples.setRootIsDecorated(True)
+        self.tree_samples.setAlternatingRowColors(False)
+        self.tree_samples.setStyleSheet(
+            "QTreeWidget { background: palette(base); border: none; }"
+            "QTreeWidget::item:selected {"
+            "  background: palette(highlight);"
+            "  color: palette(highlighted-text);"
+            "}"
         )
-        self.btn_rename_condition_group = self._tool_button(
-            "Rename",
-            "Rename the selected Condition Group.",
-            self._on_rename_condition_group,
+        self.tree_samples.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection
         )
-        self.btn_delete_condition_group = self._tool_button(
-            "Delete",
-            "Delete the selected Condition Group when it has no Samples.",
-            self._on_delete_condition_group,
-        )
-        cg_row.addWidget(self.btn_new_condition_group)
-        cg_row.addWidget(self.btn_rename_condition_group)
-        cg_row.addWidget(self.btn_delete_condition_group)
-        layout.addLayout(cg_row)
-        self.list_samples = QListWidget()
-        self.list_samples.setSelectionMode(
-            QListWidget.SelectionMode.ExtendedSelection
-        )
-        self.list_samples.currentItemChanged.connect(self._on_sample_selected)
-        self.list_samples.setContextMenuPolicy(
+        self.tree_samples.currentItemChanged.connect(self._on_explorer_selection_changed)
+        self.tree_samples.setContextMenuPolicy(
             Qt.ContextMenuPolicy.CustomContextMenu
         )
-        self.list_samples.customContextMenuRequested.connect(
-            self._on_sample_list_context_menu
+        self.tree_samples.customContextMenuRequested.connect(
+            self._on_explorer_context_menu
         )
-        layout.addWidget(self.list_samples, stretch=1)
-        self.btn_refresh_samples = self._tool_button(
-            "Refresh",
-            "Reload the sample list from workspace metadata.",
-            self._on_refresh_samples,
-        )
-        layout.addWidget(self.btn_refresh_samples)
-        nav = QHBoxLayout()
-        self.btn_prev_sample = self._tool_button(
-            "◀ Prev",
-            "Select the previous data entry in the list.",
-            self._on_prev_sample,
-        )
-        self.btn_next_sample = self._tool_button(
-            "Next ▶",
-            "Select the next data entry in the list.",
-            self._on_next_sample,
-        )
-        nav.addWidget(self.btn_prev_sample)
-        nav.addWidget(self.btn_next_sample)
-        layout.addLayout(nav)
-        hint = QLabel(
-            "All samples for the selected condition group are listed together. "
-            "Right-click to add a sample or import data."
-        )
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: #888; font-size: 11px;")
-        layout.addWidget(hint)
-        return box
+        layout.addWidget(self.tree_samples, stretch=1)
+        return panel
 
     def _build_frame_panel(self) -> QGroupBox:
         box = QGroupBox("Frame")
@@ -1217,11 +1209,15 @@ class MainWindow(QMainWindow):
     def _status(self, msg: str) -> None:
         self.statusBar().showMessage(msg, 8000)
 
-    _FULL_PREVIEW_HINT = (
-        "Full Sample Preview — orient the data and draw a rectangle around "
-        "the usable actin-rich region."
-    )
     _SELECT_SAMPLE_HINT = "Select a sample to preview."
+
+    def _set_preview_mode_banner(self, text: str | None) -> None:
+        if text:
+            self.lbl_preview_mode.setText(text)
+            self.lbl_preview_mode.show()
+        else:
+            self.lbl_preview_mode.clear()
+            self.lbl_preview_mode.hide()
 
     def reset_preview_state(
         self,
@@ -1260,11 +1256,11 @@ class MainWindow(QMainWindow):
         else:
             self._preview_mode = "full"
         if placeholder is not None:
-            self.lbl_preview_mode.setText(placeholder)
+            self._set_preview_mode_banner(placeholder)
         elif clear_image and self._current_sample is None:
-            self.lbl_preview_mode.setText(self._SELECT_SAMPLE_HINT)
-        elif not clear_image and self._current_sample is not None:
-            self.lbl_preview_mode.setText(self._FULL_PREVIEW_HINT)
+            self._set_preview_mode_banner(self._SELECT_SAMPLE_HINT)
+        else:
+            self._set_preview_mode_banner(None)
         if self._current_sample_id is None:
             self.update_tracking_result_panel()
         self._update_metric_analysis_button_visibility()
@@ -1309,16 +1305,52 @@ class MainWindow(QMainWindow):
                 self._right_tabs.setCurrentIndex(i)
                 break
 
+    def _set_left_explorer_visible(self, visible: bool) -> None:
+        """Show or hide the workspace tree (e.g. while Analysis is active)."""
+        if not hasattr(self, "_left_sidebar"):
+            return
+        if visible:
+            self._left_sidebar.show()
+            if self._splitter_sizes_before_analysis:
+                self._main_splitter.setSizes(self._splitter_sizes_before_analysis)
+                self._splitter_sizes_before_analysis = None
+            return
+        if self._left_sidebar.isVisible():
+            self._splitter_sizes_before_analysis = self._main_splitter.sizes()
+        self._left_sidebar.hide()
+
+    def _add_explorer_refresh_action(self, menu: QMenu) -> None:
+        menu.addSeparator()
+        refresh = menu.addAction(
+            "Refresh Explorer",
+            self._on_refresh_explorer,
+        )
+        refresh.setEnabled(self._project_root is not None)
+
+    def _on_refresh_explorer(self) -> None:
+        if self._project_root is None:
+            QMessageBox.warning(
+                self,
+                "Refresh Explorer",
+                "Open or create a workspace first.",
+            )
+            return
+        self._refresh_sample_list()
+        self._status("Explorer refreshed from workspace metadata.")
+
     def _on_right_tab_changed(self, index: int) -> None:
         if index < 0:
             return
         if self._right_tabs.tabText(index) == "Analysis":
             if self._preview_mode == "cropped_tracking":
                 self._exit_cropped_preview_mode()
+            self._set_left_explorer_visible(False)
             self._center_stack.setCurrentIndex(1)
             self.refresh_analysis_view()
-        elif self._center_stack.currentIndex() == 1:
-            self._center_stack.setCurrentIndex(0)
+        else:
+            if self._center_stack.currentIndex() == 1:
+                self._center_stack.setCurrentIndex(0)
+            self._set_left_explorer_visible(True)
 
     def show_analysis_view(self) -> None:
         for i in range(self._right_tabs.count()):
@@ -1388,8 +1420,10 @@ class MainWindow(QMainWindow):
         )
         if hasattr(self, "btn_run_metrics"):
             self.btn_run_metrics.setVisible(has_sample)
-        if hasattr(self, "lbl_metric_freshness"):
-            self.lbl_metric_freshness.setVisible(has_sample)
+        if hasattr(self, "lbl_metric_status"):
+            self.lbl_metric_status.setVisible(has_sample)
+        if hasattr(self, "lbl_last_analyzed"):
+            self.lbl_last_analyzed.setVisible(has_sample)
         self._update_metric_freshness_label()
 
     def _clear_metric_preview_state(self) -> None:
@@ -1425,7 +1459,7 @@ class MainWindow(QMainWindow):
         resume_playback: bool = False,
     ) -> bool:
         self._ensure_metric_view_shell_visible()
-        self.lbl_preview_mode.setText(f"{_METRIC_ANALYSIS_VIEW_LABEL} — loading…")
+        self._set_preview_mode_banner(f"{_METRIC_ANALYSIS_VIEW_LABEL} — loading…")
         self.update_tracking_result_panel()
         self._update_optical_flow_qc_readout()
         return self.enter_metric_analysis_view_for_current_sample(
@@ -1988,36 +2022,24 @@ class MainWindow(QMainWindow):
         return True
 
     def _update_sample_list_row_for_id(self, sample_id: str) -> None:
-        for i in range(self.list_samples.count()):
-            item = self.list_samples.item(i)
-            data = self._list_item_meta(item)
-            if not data or data.get("item_type") != "sample":
-                continue
-            if str(data.get("sample_id")) != str(sample_id):
-                continue
-            if (
-                self._current_sample is not None
-                and str(self._current_sample.get("sample_id")) == str(sample_id)
-            ):
-                data = dict(self._current_sample)
-                data["item_type"] = "sample"
-            status = str(data.get("processing_status", ""))
-            export_name = (
-                display_export_name_for_row(self._project_root, data)
-                if self._project_root is not None
-                else str(
-                    data.get("final_export_name") or data.get("auto_export_name") or ""
-                ).strip()
-            )
-            if not export_name:
-                export_name = str(data.get("sample_id", sample_id))
-            original = str(data.get("original_filename", ""))
-            item.setText(f"    [{sample_status_label(status)}] {export_name} — {original}")
-            item.setData(Qt.ItemDataRole.UserRole, data)
-            color = STATUS_COLORS.get(status)
-            if color:
-                item.setForeground(QBrush(color))
+        item = self._find_sample_tree_item(sample_id)
+        if item is None:
             return
+        data = self._tree_item_meta(item)
+        if not data or data.get("item_type") != ITEM_TYPE_SAMPLE:
+            return
+        if (
+            self._current_sample is not None
+            and str(self._current_sample.get("sample_id")) == str(sample_id)
+        ):
+            data = dict(self._current_sample)
+            data["item_type"] = ITEM_TYPE_SAMPLE
+        status = str(data.get("processing_status", ""))
+        item.setText(0, sample_sidebar_display_label(data))
+        item.setData(0, Qt.ItemDataRole.UserRole, data)
+        color = STATUS_COLORS.get(status)
+        if color:
+            item.setForeground(0, QBrush(color))
 
     def _is_tracking_failed(self, analysis: CroppedPreviewAnalysis) -> bool:
         return analysis.num_tracks_with_valid_steps == 0
@@ -2579,43 +2601,28 @@ class MainWindow(QMainWindow):
             return None
         return max(stamps)
 
-    @staticmethod
-    def _fmt_local_dt(dt: datetime) -> str:
-        try:
-            local = dt.astimezone()
-        except ValueError:
-            local = dt
-        hour = local.hour % 12 or 12
-        ampm = "AM" if local.hour < 12 else "PM"
-        return f"{local.strftime('%b')} {local.day}, {local.year}, {hour}:{local.minute:02d} {ampm}"
-
     def render_metric_freshness_text(self, sid: Optional[str]) -> str:
+        """Backward-compatible single-line summary (status only)."""
+        status_line, _ = self.render_metric_display_lines(sid)
+        return status_line
+
+    def render_metric_display_lines(
+        self, sid: Optional[str]
+    ) -> tuple[str, str]:
         state = self._metric_state_for_sample(sid)
-        if state == "unavailable_no_roi":
-            return "Analysis unavailable — mark an ROI first"
-        if state == "not_analyzed":
-            return "Not analyzed yet"
-        if state == "scheduled":
-            return "Metric calculation scheduled"
-        if state == "running":
-            return "Analyzing metrics…"
-        if state == "error":
-            return "Metric calculation error"
-        if state == "analyzed":
-            ts = self._last_analyzed_at_for_sample(sid) if sid else None
-            return f"Analyzed: {self._fmt_local_dt(ts)}" if ts else "Analyzed"
-        if state == "stale":
-            ts = self._last_analyzed_at_for_sample(sid) if sid else None
-            if ts:
-                return f"Needs analysis — last analyzed {self._fmt_local_dt(ts)}"
-            return "Needs analysis"
-        return "Not analyzed yet"
+        last_ts = None
+        if sid and state in ("analyzed", "stale", "scheduled", "running", "error"):
+            last_ts = self._last_analyzed_at_for_sample(sid)
+        return render_metric_display_lines(state, last_ts)
 
     def _update_metric_freshness_label(self) -> None:
-        if not hasattr(self, "lbl_metric_freshness"):
+        if not hasattr(self, "lbl_metric_status"):
             return
         sid = self._current_sample_id
-        self.lbl_metric_freshness.setText(self.render_metric_freshness_text(sid))
+        status_line, last_line = self.render_metric_display_lines(sid)
+        self.lbl_metric_status.setText(status_line)
+        if hasattr(self, "lbl_last_analyzed"):
+            self.lbl_last_analyzed.setText(last_line)
         has_roi = bool(sid) and self._sample_has_valid_data_and_roi(sid)
         if hasattr(self, "btn_run_metrics"):
             running = bool(sid) and sid in self._metrics_inflight
@@ -2944,7 +2951,7 @@ class MainWindow(QMainWindow):
         self._show_cropped_metric_settings_view()
         self._update_optical_flow_qc_readout()
         self.update_tracking_result_panel()
-        self.lbl_preview_mode.setText(f"{_METRIC_ANALYSIS_VIEW_LABEL} — {message}")
+        self._set_preview_mode_banner(f"{_METRIC_ANALYSIS_VIEW_LABEL} — {message}")
         self.lbl_cropped_frame.setText("—")
         self.lbl_frame_info.setText("—")
         self._update_metric_analysis_button_visibility()
@@ -2983,7 +2990,7 @@ class MainWindow(QMainWindow):
             self._commit_tracking_result(
                 self._current_sample_id, analysis, commit_params
             )
-        self.lbl_preview_mode.setText(_METRIC_ANALYSIS_VIEW_LABEL)
+        self._set_preview_mode_banner(_METRIC_ANALYSIS_VIEW_LABEL)
         count = max(1, len(analysis.frames))
         max_index = max(0, count - 1)
         self.slider_frame.setMaximum(max_index)
@@ -3006,7 +3013,7 @@ class MainWindow(QMainWindow):
         self._metric_analysis_view_active = False
         self._set_tracking_settings_editable(False)
         self.reset_preview_state(clear_image=False, reset_roi_controls=True)
-        self.lbl_preview_mode.setText(self._FULL_PREVIEW_HINT)
+        self._set_preview_mode_banner(None)
         self._update_metric_analysis_button_visibility()
         if self._base_frame is not None:
             self.slider_frame.setMaximum(max(0, self._total_frames - 1))
@@ -3524,42 +3531,92 @@ class MainWindow(QMainWindow):
             f"{err_preview}",
         )
 
-    def _list_item_meta(self, item: QListWidgetItem | None) -> dict[str, Any] | None:
+    def _tree_item_meta(self, item: QTreeWidgetItem | None) -> dict[str, Any] | None:
         if item is None:
             return None
-        data = item.data(Qt.ItemDataRole.UserRole)
+        data = item.data(0, Qt.ItemDataRole.UserRole)
         return data if isinstance(data, dict) else None
 
     @staticmethod
-    def _is_sample_item(item: QListWidgetItem | None) -> bool:
+    def _is_sample_tree_item(item: QTreeWidgetItem | None) -> bool:
         if item is None:
             return False
-        data = item.data(Qt.ItemDataRole.UserRole)
-        return isinstance(data, dict) and data.get("item_type") == "sample"
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        return isinstance(data, dict) and data.get("item_type") == ITEM_TYPE_SAMPLE
+
+    def _iter_explorer_tree_items(self) -> list[QTreeWidgetItem]:
+        items: list[QTreeWidgetItem] = []
+
+        def walk(parent: QTreeWidgetItem) -> None:
+            for idx in range(parent.childCount()):
+                child = parent.child(idx)
+                items.append(child)
+                walk(child)
+
+        for top_idx in range(self.tree_samples.topLevelItemCount()):
+            top = self.tree_samples.topLevelItem(top_idx)
+            if top is not None:
+                items.append(top)
+                walk(top)
+        return items
+
+    def _iter_sample_tree_items(self) -> list[QTreeWidgetItem]:
+        return [
+            item
+            for item in self._iter_explorer_tree_items()
+            if self._is_sample_tree_item(item)
+        ]
+
+    def _find_sample_tree_item(self, sample_id: str) -> QTreeWidgetItem | None:
+        target = str(sample_id)
+        for item in self._iter_sample_tree_items():
+            meta = self._tree_item_meta(item)
+            if meta and str(meta.get("sample_id", "")) == target:
+                return item
+        return None
+
+    def _selected_condition_group_id_from_tree(self) -> str | None:
+        item = self.tree_samples.currentItem()
+        if item is None:
+            return None
+        meta = self._tree_item_meta(item)
+        gid = tree_item_condition_group_id(meta)
+        if gid:
+            return gid
+        parent = item.parent()
+        while parent is not None:
+            meta = self._tree_item_meta(parent)
+            gid = tree_item_condition_group_id(meta)
+            if gid:
+                return gid
+            parent = parent.parent()
+        return None
+
+    def _sync_combo_from_tree_selection(self) -> None:
+        gid = self._selected_condition_group_id_from_tree()
+        if gid and self._project_root is not None:
+            self._refresh_condition_group_combo(select=gid)
+            self._set_last_import_breed(gid)
 
     def _selected_sample_ids(self) -> list[str]:
         ids = []
-        for item in self.list_samples.selectedItems():
-            data = self._list_item_meta(item)
-            if data and data.get("item_type") == "sample":
+        for item in self.tree_samples.selectedItems():
+            data = self._tree_item_meta(item)
+            if data and data.get("item_type") == ITEM_TYPE_SAMPLE:
                 ids.append(str(data["sample_id"]))
         return ids
 
     def _navigate_sample(self, delta: int) -> None:
-        rows = []
-        for i in range(self.list_samples.count()):
-            item = self.list_samples.item(i)
-            if self._is_sample_item(item):
-                rows.append(i)
+        rows = self._iter_sample_tree_items()
         if not rows:
             return
-        cur = self.list_samples.currentRow()
+        current = self.tree_samples.currentItem()
         try:
-            pos = rows.index(cur)
+            pos = rows.index(current)  # type: ignore[arg-type]
         except ValueError:
             pos = 0
         pos = max(0, min(len(rows) - 1, pos + delta))
-        self.list_samples.setCurrentRow(rows[pos])
+        self.tree_samples.setCurrentItem(rows[pos])
 
     def _on_prev_sample(self) -> None:
         self._navigate_sample(-1)
@@ -3582,7 +3639,6 @@ class MainWindow(QMainWindow):
                 self._last_import_breed = saved_breed
             add_recent(root, root)
             self._refresh_recent_menu()
-            self.btn_refresh_samples.setEnabled(True)
             self._update_workspace_label()
             self._set_active_sample(None)
             self.reset_preview_state(
@@ -3607,6 +3663,11 @@ class MainWindow(QMainWindow):
         """Return the selected stable condition_group_id, if any."""
         if self._project_root is None:
             return None
+        from_tree = self._selected_condition_group_id_from_tree()
+        if from_tree:
+            resolved = resolve_condition_group_id(self._project_root, from_tree)
+            if resolved:
+                return resolved
         data = self.combo_filter_group.currentData()
         if isinstance(data, str) and data.strip():
             return resolve_condition_group_id(self._project_root, data)
@@ -3741,17 +3802,10 @@ class MainWindow(QMainWindow):
         self._status(f"Deleted Condition Group: {current_name}")
 
     def _on_filter_group_changed(self) -> None:
+        """Legacy hook; filter combo is hidden — tree drives group selection."""
         group = self._current_condition_group()
         if group:
             self._set_last_import_breed(group)
-        self._metric_analysis_view_active = False
-        self._set_active_sample(None)
-        self.reset_preview_state(
-            clear_image=True,
-            placeholder=self._SELECT_SAMPLE_HINT,
-        )
-        self._refresh_sample_list()
-        self.update_tracking_result_panel()
 
     def _after_import_refresh(
             self,
@@ -3774,17 +3828,26 @@ class MainWindow(QMainWindow):
 
     def _select_first_video_in_batch(self, group: str, batch_name: str) -> None:
         safe = sanitize_batch_name(batch_name)
-        for i in range(self.list_samples.count()):
-            item = self.list_samples.item(i)
-            meta = self._list_item_meta(item)
-            if not meta or meta.get("item_type") != "sample":
+        for item in self._iter_sample_tree_items():
+            meta = self._tree_item_meta(item)
+            if not meta:
                 continue
             if str(meta.get("group")) != group:
                 continue
             if sanitize_batch_name(str(meta.get("batch_name", ""))) != safe:
                 continue
-            self.list_samples.setCurrentItem(item)
-            break
+            self.tree_samples.setCurrentItem(item)
+            return
+        for item in self._iter_explorer_tree_items():
+            meta = self._tree_item_meta(item)
+            if not meta or meta.get("item_type") != ITEM_TYPE_EMPTY_SAMPLE:
+                continue
+            if str(meta.get("group")) != group:
+                continue
+            if sanitize_batch_name(str(meta.get("batch_name", ""))) != safe:
+                continue
+            self.tree_samples.setCurrentItem(item)
+            return
 
     def _ensure_filter_group_valid(self) -> str:
         """Return the selected Condition Group name, or empty when none exist."""
@@ -3966,16 +4029,17 @@ class MainWindow(QMainWindow):
 
     def _select_sample_header(self, group: str, batch_name: str) -> None:
         safe = sanitize_batch_name(batch_name)
-        for i in range(self.list_samples.count()):
-            item = self.list_samples.item(i)
-            meta = self._list_item_meta(item)
-            if not meta or meta.get("item_type") != "batch_header":
+        for item in self._iter_explorer_tree_items():
+            meta = self._tree_item_meta(item)
+            if not meta:
                 continue
-            if str(meta.get("group")) == group and sanitize_batch_name(
-                str(meta.get("batch_name", ""))
-            ) == safe:
-                self.list_samples.setCurrentItem(item)
-                break
+            if str(meta.get("group")) != group:
+                continue
+            if sanitize_batch_name(str(meta.get("batch_name", ""))) != safe:
+                continue
+            if meta.get("item_type") in (ITEM_TYPE_EMPTY_SAMPLE, ITEM_TYPE_SAMPLE):
+                self.tree_samples.setCurrentItem(item)
+                return
 
     def _on_new_batch(self) -> None:
         self._on_add_sample()
@@ -4021,126 +4085,109 @@ class MainWindow(QMainWindow):
         if folder:
             self._load_project(Path(folder), "Project loaded")
 
-    def _add_sample_list_header(self, group: str, batch: dict[str, Any]) -> None:
-        text = self._batch_list_header_text(self._project_root, group, batch)
-        item = QListWidgetItem(text)
-        item.setFlags(Qt.ItemFlag.NoItemFlags)
-        item.setForeground(QBrush(QColor("#888888")))
+    def _collect_expanded_condition_group_ids(self) -> set[str]:
+        expanded: set[str] = set()
+        for top_idx in range(self.tree_samples.topLevelItemCount()):
+            top = self.tree_samples.topLevelItem(top_idx)
+            if top is None or not top.isExpanded():
+                continue
+            meta = self._tree_item_meta(top)
+            if meta and meta.get("item_type") == ITEM_TYPE_CONDITION_GROUP:
+                gid = str(meta.get("condition_group_id", "")).strip()
+                if gid:
+                    expanded.add(gid)
+        return expanded
+
+    def _add_explorer_group_item(
+        self,
+        group_id: str,
+        display_name: str,
+        *,
+        expanded: bool,
+    ) -> QTreeWidgetItem:
+        item = QTreeWidgetItem([display_name])
         item.setData(
+            0,
             Qt.ItemDataRole.UserRole,
-            {
-                "item_type": "batch_header",
-                "group": group,
-                "batch_name": str(batch.get("batch_name", "")),
-                "batch_number": int(batch.get("batch_number", 1) or 1),
-            },
+            condition_group_tree_meta(group_id),
         )
-        self.list_samples.addItem(item)
+        item.setExpanded(expanded)
+        self.tree_samples.addTopLevelItem(item)
+        return item
 
-    def _add_sample_list_message(self, text: str) -> None:
-        item = QListWidgetItem(text)
-        item.setFlags(Qt.ItemFlag.NoItemFlags)
-        item.setForeground(QBrush(QColor("#aaaaaa")))
-        self.list_samples.addItem(item)
-
-    def _add_sample_list_empty_row(self, group: str, batch: dict[str, Any]) -> None:
-        item = QListWidgetItem("    (incomplete — right-click Replace Data)")
-        item.setFlags(Qt.ItemFlag.NoItemFlags)
-        item.setForeground(QBrush(QColor("#666666")))
-        item.setData(
-            Qt.ItemDataRole.UserRole,
-            {
-                "item_type": "batch_empty",
-                "group": group,
-                "batch_name": str(batch.get("batch_name", "")),
-                "batch_number": int(batch.get("batch_number", 1) or 1),
-            },
-        )
-        self.list_samples.addItem(item)
-
-    def _add_sample_list_row(self, row: pd.Series) -> None:
-        status = str(row["processing_status"])
+    def _add_explorer_sample_item(
+        self,
+        parent: QTreeWidgetItem,
+        row: pd.Series,
+    ) -> QTreeWidgetItem:
         row_dict = row.to_dict()
-        export_name = (
-            display_export_name_for_row(self._project_root, row_dict)
-            if self._project_root is not None
-            else str(
-                row.get("final_export_name") or row.get("auto_export_name") or ""
-            ).strip()
-        )
-        if not export_name:
-            export_name = str(row["sample_id"])
-        original = str(row.get("original_filename", ""))
-        label = f"    [{sample_status_label(status)}] {export_name} — {original}"
-        item = QListWidgetItem(label)
-        sample_data = row.to_dict()
-        sample_data["item_type"] = "sample"
-        item.setData(Qt.ItemDataRole.UserRole, sample_data)
+        label = sample_sidebar_display_label(row_dict)
+        item = QTreeWidgetItem([label])
+        item.setData(0, Qt.ItemDataRole.UserRole, sample_tree_meta(row_dict))
+        status = str(row_dict.get("processing_status", ""))
         color = STATUS_COLORS.get(status)
         if color:
-            item.setForeground(QBrush(color))
-        self.list_samples.addItem(item)
+            item.setForeground(0, QBrush(color))
+        parent.addChild(item)
+        return item
 
-    def _refresh_sample_list(self) -> None:
-        keep_id = (
-            str(self._current_sample["sample_id"])
-            if self._current_sample
-            else None
+    def _add_explorer_empty_sample_item(
+        self,
+        parent: QTreeWidgetItem,
+        group_id: str,
+        batch: dict[str, Any],
+    ) -> QTreeWidgetItem:
+        batch_name = str(batch.get("batch_name", ""))
+        label = empty_sample_sidebar_label(batch_name)
+        item = QTreeWidgetItem([label])
+        item.setData(
+            0,
+            Qt.ItemDataRole.UserRole,
+            empty_sample_tree_meta(
+                group_id,
+                batch_name,
+                batch_number=int(batch.get("batch_number", 1) or 1),
+            ),
         )
-        self.list_samples.clear()
-        if self._project_root is None:
-            return
-        try:
-            df, _missing_ids = sync_samples_with_disk(self._project_root)
-        except Exception as e:
-            QMessageBox.warning(self, "Metadata", str(e))
-            return
+        item.setForeground(0, QBrush(QColor("#666666")))
+        parent.addChild(item)
+        return item
 
-        group = self._ensure_filter_group_valid()
-        if not group:
-            self._add_sample_list_message(
-                "Create a Condition Group before adding Samples. Use New Group above."
-            )
-            self._set_active_sample(None)
-            self._clear_preview_pane()
-            return
-
-        group_df = df[df["condition_group_id"].astype(str) == group] if "condition_group_id" in df.columns else df[df["group"].astype(str) == group]
-
+    def _populate_explorer_group(
+        self,
+        parent: QTreeWidgetItem,
+        group_id: str,
+        df: pd.DataFrame,
+    ) -> None:
         sync_registry_from_samples(self._project_root)
-        batches = list_batches(self._project_root, group)
+        batches = list_batches(self._project_root, group_id)
+        group_df = (
+            df[df["condition_group_id"].astype(str) == group_id]
+            if "condition_group_id" in df.columns
+            else df[df["group"].astype(str) == group_id]
+        )
 
         if not batches and not group_df.empty:
             sync_registry_from_samples(self._project_root)
-            batches = list_batches(self._project_root, group)
-
-        if not batches and group_df.empty:
-            self._add_sample_list_message(
-                "No samples available for this condition group. Right-click to Add Sample."
-            )
-            self._set_active_sample(None)
-            self._clear_preview_pane()
-            return
+            batches = list_batches(self._project_root, group_id)
 
         seen_batches: set[str] = set()
         for batch in batches:
             batch_name = str(batch["batch_name"])
             safe = sanitize_batch_name(batch_name)
             seen_batches.add(safe)
-            self._add_sample_list_header(group, batch)
             batch_rows = group_df[
-                group_df["batch_name"].astype(str).apply(sanitize_batch_name)
-                == safe
+                group_df["batch_name"].astype(str).apply(sanitize_batch_name) == safe
             ]
             if batch_rows.empty:
-                self._add_sample_list_empty_row(group, batch)
+                self._add_explorer_empty_sample_item(parent, group_id, batch)
                 continue
             batch_rows = batch_rows.sort_values(
                 by=["frame_number", "sample_id"],
                 key=lambda col: col.astype(str),
             )
             for _, row in batch_rows.iterrows():
-                self._add_sample_list_row(row)
+                self._add_explorer_sample_item(parent, row)
 
         orphan = group_df[
             ~group_df["batch_name"]
@@ -4158,7 +4205,6 @@ class MainWindow(QMainWindow):
                     "batch_name": batch_name,
                     "batch_number": parse_batch_number_from_name(batch_name) or 0,
                 }
-                self._add_sample_list_header(group, orphan_batch)
                 batch_rows = orphan[
                     orphan["batch_name"]
                     .astype(str)
@@ -4168,35 +4214,76 @@ class MainWindow(QMainWindow):
                     by=["frame_number", "sample_id"],
                     key=lambda col: col.astype(str),
                 )
-                for _, row in batch_rows.iterrows():
-                    self._add_sample_list_row(row)
+                if batch_rows.empty:
+                    self._add_explorer_empty_sample_item(
+                        parent, group_id, orphan_batch
+                    )
+                else:
+                    for _, row in batch_rows.iterrows():
+                        self._add_explorer_sample_item(parent, row)
+
+    def _refresh_sample_list(self) -> None:
+        keep_id = (
+            str(self._current_sample["sample_id"])
+            if self._current_sample
+            else None
+        )
+        expanded_groups = self._collect_expanded_condition_group_ids()
+        self.tree_samples.blockSignals(True)
+        self.tree_samples.clear()
+        if self._project_root is None:
+            self.lbl_explorer_empty.setVisible(False)
+            self.tree_samples.blockSignals(False)
+            return
+        try:
+            df, _missing_ids = sync_samples_with_disk(self._project_root)
+        except Exception as e:
+            self.tree_samples.blockSignals(False)
+            QMessageBox.warning(self, "Metadata", str(e))
+            return
+
+        records = list_condition_group_records(self._project_root)
+        if not records:
+            self.lbl_explorer_empty.setVisible(True)
+            self._set_active_sample(None)
+            self._clear_preview_pane()
+            self.tree_samples.blockSignals(False)
+            return
+
+        self.lbl_explorer_empty.setVisible(False)
+        expand_all = not expanded_groups
+        for record in records:
+            should_expand = expand_all or record.id in expanded_groups
+            group_item = self._add_explorer_group_item(
+                record.id,
+                record.name,
+                expanded=should_expand,
+            )
+            self._populate_explorer_group(group_item, record.id, df)
 
         if keep_id:
-            for i in range(self.list_samples.count()):
-                item = self.list_samples.item(i)
-                data = self._list_item_meta(item)
-                if (
-                    data
-                    and data.get("item_type") == "sample"
-                    and str(data.get("sample_id")) == keep_id
-                ):
-                    self.list_samples.setCurrentItem(item)
-                    break
+            item = self._find_sample_tree_item(keep_id)
+            if item is not None:
+                self.tree_samples.setCurrentItem(item)
+                parent = item.parent()
+                if parent is not None:
+                    parent.setExpanded(True)
         else:
-            first_sample = None
-            for i in range(self.list_samples.count()):
-                item = self.list_samples.item(i)
-                if self._is_sample_item(item):
-                    first_sample = item
-                    break
-            if first_sample is not None:
-                self.list_samples.setCurrentItem(first_sample)
+            sample_items = self._iter_sample_tree_items()
+            if sample_items:
+                self.tree_samples.setCurrentItem(sample_items[0])
             else:
                 self._set_active_sample(None)
                 self._clear_preview_pane()
 
+        self._sync_combo_from_tree_selection()
+        self.tree_samples.blockSignals(False)
+        current = self.tree_samples.currentItem()
+        if current is not None and self._is_sample_tree_item(current):
+            self._load_sample_from_tree_item(current)
+
     def _on_refresh_samples(self) -> None:
-            self._refresh_sample_list()
+        self._on_refresh_explorer()
 
     def _on_remove_missing_samples(self) -> None:
         if self._project_root is None:
@@ -4224,11 +4311,12 @@ class MainWindow(QMainWindow):
             placeholder=self._SELECT_SAMPLE_HINT,
         )
 
-    def _on_sample_selected(
+    def _on_explorer_selection_changed(
         self,
-        current: Optional[QListWidgetItem],
-        _previous: Optional[QListWidgetItem],
+        current: Optional[QTreeWidgetItem],
+        _previous: Optional[QTreeWidgetItem],
     ) -> None:
+        self._sync_combo_from_tree_selection()
         if current is None:
             self._metric_analysis_view_active = False
             self._set_active_sample(None)
@@ -4238,8 +4326,13 @@ class MainWindow(QMainWindow):
             )
             self.update_tracking_result_panel()
             return
-        data = self._list_item_meta(current)
-        if not data or data.get("item_type") != "sample":
+        if not self._is_sample_tree_item(current):
+            return
+        self._load_sample_from_tree_item(current)
+
+    def _load_sample_from_tree_item(self, item: QTreeWidgetItem) -> None:
+        data = self._tree_item_meta(item)
+        if not data or data.get("item_type") != ITEM_TYPE_SAMPLE:
             return
 
         was_metric_analysis_view = self._metric_analysis_view_active
@@ -4270,7 +4363,7 @@ class MainWindow(QMainWindow):
             if was_metric_analysis_view:
                 self._clear_sample_specific_metric_state()
                 self._ensure_metric_view_shell_visible()
-                self.lbl_preview_mode.setText(f"{_METRIC_ANALYSIS_VIEW_LABEL} — loading…")
+                self._set_preview_mode_banner(f"{_METRIC_ANALYSIS_VIEW_LABEL} — loading…")
                 if not self._load_sample_data_context(render_full_preview=False):
                     self._show_metric_analysis_placeholder(
                         "Metric Analysis View is unavailable because this Sample "
@@ -4290,6 +4383,14 @@ class MainWindow(QMainWindow):
             self._preview_page.setUpdatesEnabled(True)
             self._preview_page.update()
         self._update_metric_freshness_label()
+
+    def _on_sample_selected(
+        self,
+        current: Optional[QTreeWidgetItem],
+        _previous: Optional[QTreeWidgetItem],
+    ) -> None:
+        """Backward-compatible alias for explorer selection."""
+        self._on_explorer_selection_changed(current, _previous)
 
     def _sample_file_path(self) -> Optional[Path]:
         if self._project_root is None or self._current_sample is None:
@@ -4408,7 +4509,7 @@ class MainWindow(QMainWindow):
 
         if render_full_preview:
             self._preview_mode = "full"
-            self.lbl_preview_mode.setText(self._FULL_PREVIEW_HINT)
+            self._set_preview_mode_banner(None)
             self.update_tracking_result_panel()
             self._update_metric_analysis_button_visibility()
         return True
@@ -4610,25 +4711,52 @@ class MainWindow(QMainWindow):
             "Operation finished.\n\n" + ("\n".join(lines) if lines else "Done."),
         )
 
-    def _on_sample_list_context_menu(self, pos) -> None:
+    def _on_explorer_context_menu(self, pos) -> None:
         if self._project_root is None:
             QMessageBox.warning(
                 self,
-                "Sample List",
+                "Workspace",
                 "Open or create a workspace first.",
             )
             return
-        item = self.list_samples.itemAt(pos)
+        item = self.tree_samples.itemAt(pos)
         menu = QMenu(self)
-        meta = self._list_item_meta(item)
+        meta = self._tree_item_meta(item)
 
-        if meta and meta.get("item_type") in (
-            "batch_header",
-            "batch_empty",
-            "sample",
-        ):
+        if item is None:
+            menu.addAction(
+                "New Condition Group",
+                self._on_create_condition_group,
+            )
+            self._add_explorer_refresh_action(menu)
+            menu.exec(self.tree_samples.viewport().mapToGlobal(pos))
+            return
+
+        item_type = meta.get("item_type") if meta else None
+
+        if item_type == ITEM_TYPE_CONDITION_GROUP:
+            group_id = str(meta.get("condition_group_id", ""))
+            menu.addAction(
+                "Add Sample(s)",
+                lambda gid=group_id: self._on_add_sample(gid),
+            )
+            menu.addAction(
+                "Rename Condition Group",
+                lambda gid=group_id: self._ctx_rename_condition_group(gid),
+            )
+            menu.addAction(
+                "Delete Condition Group",
+                lambda gid=group_id: self._ctx_delete_condition_group(gid),
+            )
+            self._add_explorer_refresh_action(menu)
+        elif item_type in (ITEM_TYPE_SAMPLE, ITEM_TYPE_EMPTY_SAMPLE):
             group = str(meta.get("group", self._ensure_filter_group_valid()))
             batch_name = str(meta.get("batch_name", ""))
+            menu.addAction(
+                "Replace Data",
+                lambda g=group, b=batch_name: self._ctx_replace_sample_data(g, b),
+            )
+            menu.addSeparator()
             menu.addAction(
                 "Rename Sample",
                 lambda g=group, b=batch_name: self._ctx_rename_batch(g, b),
@@ -4637,25 +4765,28 @@ class MainWindow(QMainWindow):
                 "Delete Sample",
                 lambda g=group, b=batch_name: self._ctx_delete_batch(g, b),
             )
-            menu.addSeparator()
-            menu.addAction(
-                "Replace Data",
-                lambda g=group, b=batch_name: self._ctx_replace_sample_data(g, b),
-            )
+            self._add_explorer_refresh_action(menu)
         else:
-            breed = self._current_condition_group()
-            add_action = menu.addAction(
-                "Add Sample",
-                lambda: self._on_add_sample(breed),
+            menu.addAction(
+                "New Condition Group",
+                self._on_create_condition_group,
             )
-            if not breed:
-                add_action.setEnabled(False)
-                menu.addAction(
-                    "Create a Condition Group before adding Samples."
-                ).setEnabled(False)
+            self._add_explorer_refresh_action(menu)
 
         if not menu.isEmpty():
-            menu.exec(self.list_samples.viewport().mapToGlobal(pos))
+            menu.exec(self.tree_samples.viewport().mapToGlobal(pos))
+
+    def _ctx_rename_condition_group(self, group_id: str) -> None:
+        self._refresh_condition_group_combo(select=group_id)
+        self._on_rename_condition_group()
+
+    def _ctx_delete_condition_group(self, group_id: str) -> None:
+        self._refresh_condition_group_combo(select=group_id)
+        self._on_delete_condition_group()
+
+    def _on_sample_list_context_menu(self, pos) -> None:
+        """Backward-compatible alias."""
+        self._on_explorer_context_menu(pos)
 
     def _ctx_replace_sample_data(self, group: str, batch_name: str) -> None:
         if self._project_root is None or not group or not batch_name:
@@ -5013,7 +5144,7 @@ class MainWindow(QMainWindow):
 
     def _menu_delete_file_from_batch(self) -> None:
         if self._project_root is None or self._current_sample is None:
-            QMessageBox.warning(self, "Delete", "Select a data file in the sample list first.")
+            QMessageBox.warning(self, "Delete", "Select a data file in the explorer first.")
             return
         sid = str(self._current_sample["sample_id"])
         self._ctx_delete_file(sid, self._current_sample)
