@@ -26,7 +26,7 @@ class MetricSchedulingTests(unittest.TestCase):
 
     def test_optical_flow_mask_percentile_default(self) -> None:
         defaults = OpticalFlowSettings()
-        self.assertEqual(defaults.mask_percentile, 90.0)
+        self.assertEqual(defaults.mask_percentile, 65.0)
 
     def test_batch_export_accepts_roi_marked(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

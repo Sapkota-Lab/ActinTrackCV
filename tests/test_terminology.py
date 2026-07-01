@@ -34,6 +34,32 @@ class UserFacingTerminologyTests(unittest.TestCase):
         self.assertIn("Refresh Explorer", src)
         self.assertIn("_LEFT_PANEL_MIN_WIDTH", src)
         self.assertIn("setCollapsible", src)
+        self.assertIn("_DEFAULT_SPLITTER_SIZES", src)
+        self.assertNotIn('addTab(preview, "Frame")', src)
+        self.assertNotIn("Selected Data File", src)
+        self.assertIn("btn_playback_play", src)
+        self.assertIn("btn_playback_pause", src)
+        self.assertIn("slider_sample_frame", src)
+        self.assertIn("lbl_sample_frame", src)
+        self.assertIn("combo_sample_playback_speed", src)
+        self.assertIn("chk_playback_loop", src)
+        self.assertIn("_build_hidden_frame_controls", src)
+        self.assertIn("Return to Samples", src)
+        self.assertIn('"Export ROI"', src)
+        self.assertIn("spin_of_mask_percentile", src)
+        orient_block = src.split("def _build_unified_orient_roi_panel", 1)[1].split(
+            "def _configure_tracking_field", 1
+        )[0]
+        sample_tab_block = src.split("sample_tab = QWidget()", 1)[1].split(
+            "analysis_tab = QWidget()", 1
+        )[0]
+        self.assertIn("sample_sidebar_display_label(sample)", src)
+        self.assertIn("_build_export_name_panel()", orient_block)
+        self.assertNotIn("_build_export_name_panel()", sample_tab_block)
+        self.assertLess(
+            orient_block.index("_build_export_name_panel()"),
+            orient_block.index("self.btn_process ="),
+        )
 
     def test_analysis_view_headers_use_condition_group(self) -> None:
         src = _read("actintrack_app/analysis_view.py")

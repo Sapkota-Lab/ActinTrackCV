@@ -63,16 +63,6 @@ class AnalysisViewWidget(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
 
-        intro = QLabel(
-            "Tracking, motion-index, and optical-flow metrics aggregated by "
-            "Condition Group and Sample. "
-            "Results are read from saved sample data; opening this view does not "
-            "re-run tracking."
-        )
-        intro.setWordWrap(True)
-        intro.setStyleSheet("color: #666; margin-bottom: 6px;")
-        layout.addWidget(intro)
-
         self.lbl_empty = QLabel("")
         self.lbl_empty.setWordWrap(True)
         self.lbl_empty.setStyleSheet("color: #888; font-style: italic;")

@@ -25,7 +25,7 @@ DOWNWARD_DIRECTION = "increasing_y"
 class OpticalFlowSettings:
     """Parameters for dense Farnebäck optical-flow motion index."""
 
-    mask_percentile: float = 90.0
+    mask_percentile: float = 65.0
     gaussian_blur_kernel: int = 3
     pyr_scale: float = 0.5
     levels: int = 3

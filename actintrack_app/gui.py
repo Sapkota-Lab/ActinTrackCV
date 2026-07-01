@@ -15,6 +15,7 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QBrush, QColor, QIcon
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QAbstractSpinBox,
     QApplication,
     QCheckBox,
     QComboBox,
@@ -135,6 +136,7 @@ from actintrack_app.explorer_sidebar import (
     sample_tree_meta,
     tree_item_condition_group_id,
 )
+from actintrack_app.explorer_tree import ExplorerTreeWidget
 from actintrack_app.recent_workspaces import add_recent
 from actintrack_app.user_preferences import get_last_import_breed, set_last_import_breed
 from actintrack_app.orientation import (
@@ -232,6 +234,16 @@ _METRIC_ANALYSIS_VIEW_LABEL = "Metric Analysis View"
 
 _LEFT_PANEL_MIN_WIDTH = 200
 _RIGHT_PANEL_MIN_WIDTH = 260
+_DEFAULT_SPLITTER_SIZES = [_LEFT_PANEL_MIN_WIDTH, 900, _RIGHT_PANEL_MIN_WIDTH]
+_PLAYBACK_SPEED_OPTIONS = ("0.25×", "0.5×", "1×", "1.5×", "2×")
+_PLAYBACK_SPEED_MULTIPLIERS = {
+    "0.25×": 0.25,
+    "0.5×": 0.5,
+    "1×": 1.0,
+    "1.5×": 1.5,
+    "2×": 2.0,
+}
+_PLAYBACK_BASE_FPS = 5.0
 
 _ADVANCED_SAMPLE_STATUSES = frozenset(
     {
@@ -528,14 +540,84 @@ class MainWindow(QMainWindow):
         self.lbl_last_analyzed.hide()
         center_layout.addWidget(self.lbl_last_analyzed)
 
+        sample_playback = QVBoxLayout()
+        sample_playback.setSpacing(4)
+        sample_transport_row = QHBoxLayout()
+        sample_speed_row = QHBoxLayout()
+        self.btn_playback_play = QPushButton("Play")
+        self.btn_playback_play.setToolTip("Play through the loaded sample frames.")
+        self.btn_playback_play.clicked.connect(self._playback_play)
+        self.btn_playback_pause = QPushButton("Pause")
+        self.btn_playback_pause.setToolTip("Pause frame playback.")
+        self.btn_playback_pause.clicked.connect(self._playback_pause)
+        self.lbl_sample_frame = QLabel("Frame —")
+        self.lbl_sample_frame.setMinimumWidth(72)
+        self.slider_sample_frame = QSlider(Qt.Orientation.Horizontal)
+        self.slider_sample_frame.setMinimumWidth(120)
+        self.slider_sample_frame.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
+        self.slider_sample_frame.valueChanged.connect(self._on_sample_frame_slider)
+        self.lbl_sample_playback_speed = QLabel("Speed:")
+        self.combo_sample_playback_speed = QComboBox()
+        self.combo_sample_playback_speed.addItems(list(_PLAYBACK_SPEED_OPTIONS))
+        self.combo_sample_playback_speed.setCurrentText("1×")
+        self.combo_sample_playback_speed.setMinimumWidth(72)
+        self.combo_sample_playback_speed.setSizePolicy(
+            QSizePolicy.Policy.Fixed,
+            QSizePolicy.Policy.Fixed,
+        )
+        self.combo_sample_playback_speed.currentTextChanged.connect(
+            self._on_sample_playback_speed_changed
+        )
+        self.chk_playback_loop = QCheckBox("Loop")
+        self.chk_playback_loop.setToolTip(
+            "When checked, playback restarts at the first frame after the last frame."
+        )
+        self.chk_playback_loop.setChecked(True)
+        for widget in (
+            self.btn_playback_play,
+            self.btn_playback_pause,
+            self.lbl_sample_frame,
+            self.slider_sample_frame,
+            self.lbl_sample_playback_speed,
+            self.combo_sample_playback_speed,
+            self.chk_playback_loop,
+        ):
+            widget.hide()
+        sample_transport_row.addWidget(self.btn_playback_play)
+        sample_transport_row.addWidget(self.btn_playback_pause)
+        sample_transport_row.addWidget(self.lbl_sample_frame)
+        sample_transport_row.addWidget(self.slider_sample_frame, stretch=1)
+        sample_speed_row.addWidget(self.lbl_sample_playback_speed)
+        sample_speed_row.addWidget(self.combo_sample_playback_speed)
+        sample_speed_row.addWidget(self.chk_playback_loop)
+        sample_speed_row.addStretch()
+        sample_playback.addLayout(sample_transport_row)
+        sample_playback.addLayout(sample_speed_row)
+        center_layout.addLayout(sample_playback)
+        self._sample_playback_widgets = (
+            self.btn_playback_play,
+            self.btn_playback_pause,
+            self.lbl_sample_frame,
+            self.slider_sample_frame,
+            self.lbl_sample_playback_speed,
+            self.combo_sample_playback_speed,
+            self.chk_playback_loop,
+        )
+
+        self._hidden_frame_host = self._build_hidden_frame_controls()
+        center_layout.addWidget(self._hidden_frame_host)
+
         preview_controls = QVBoxLayout()
         preview_controls.setSpacing(4)
         preview_transport_row = QHBoxLayout()
         preview_speed_row = QHBoxLayout()
         self.btn_preview_play = QPushButton("Play")
-        self.btn_preview_play.clicked.connect(self._preview_play)
+        self.btn_preview_play.clicked.connect(self._playback_play)
         self.btn_preview_pause = QPushButton("Pause")
-        self.btn_preview_pause.clicked.connect(self._preview_pause)
+        self.btn_preview_pause.clicked.connect(self._playback_pause)
         self.lbl_cropped_frame = QLabel("Frame 1 / 1")
         self.lbl_cropped_frame.setMinimumWidth(72)
         self.slider_cropped_frame = QSlider(Qt.Orientation.Horizontal)
@@ -547,7 +629,7 @@ class MainWindow(QMainWindow):
         self.slider_cropped_frame.valueChanged.connect(self._on_cropped_preview_frame_slider)
         self.lbl_preview_speed = QLabel("Speed:")
         self.combo_preview_speed = QComboBox()
-        self.combo_preview_speed.addItems(["0.25×", "0.5×", "1×", "1.5×", "2×"])
+        self.combo_preview_speed.addItems(list(_PLAYBACK_SPEED_OPTIONS))
         self.combo_preview_speed.setCurrentText("1×")
         self.combo_preview_speed.currentTextChanged.connect(
             self._on_preview_speed_changed
@@ -600,7 +682,7 @@ class MainWindow(QMainWindow):
         self._right_sidebar = self._build_right_sidebar()
         splitter.addWidget(self._center_stack)
         splitter.addWidget(self._right_sidebar)
-        splitter.setSizes([260, 780, 260])
+        splitter.setSizes(list(_DEFAULT_SPLITTER_SIZES))
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setStretchFactor(2, 0)
@@ -628,19 +710,10 @@ class MainWindow(QMainWindow):
         stack.setMaximumWidth(380)
 
         self._right_tabs = QTabWidget()
-        preview = QWidget()
-        preview_layout = QVBoxLayout(preview)
-        preview_layout.setContentsMargins(6, 6, 6, 6)
-        preview_layout.addWidget(self._build_frame_panel())
-        preview_layout.addWidget(self._build_selected_panel())
-        preview_layout.addStretch()
-        self._right_tabs.addTab(preview, "Frame")
-
         roi_tab = QWidget()
         roi_layout = QVBoxLayout(roi_tab)
         roi_layout.setContentsMargins(6, 6, 6, 6)
         roi_layout.addWidget(self._build_unified_orient_roi_panel())
-        roi_layout.addStretch()
         self._right_tabs.addTab(roi_tab, "Orient && ROI")
 
         sample_tab = QWidget()
@@ -654,19 +727,18 @@ class MainWindow(QMainWindow):
         analysis_tab = QWidget()
         analysis_tab_layout = QVBoxLayout(analysis_tab)
         analysis_tab_layout.setContentsMargins(6, 6, 6, 6)
-        analysis_hint = QLabel(
-            "Condition Group and sample tracking metrics appear in the center column. "
-            "Results are loaded from saved data; tracking is not re-run here."
-        )
-        analysis_hint.setWordWrap(True)
-        analysis_hint.setStyleSheet("color: #666; font-size: 11px;")
-        analysis_tab_layout.addWidget(analysis_hint)
         self.btn_refresh_analysis = QPushButton("Refresh Analysis")
         self.btn_refresh_analysis.setToolTip(
             "Reload analysis tables from saved tracking and motion-index results."
         )
         self.btn_refresh_analysis.clicked.connect(self.refresh_analysis_view)
         analysis_tab_layout.addWidget(self.btn_refresh_analysis)
+        self.btn_return_to_samples = QPushButton("Return to Samples")
+        self.btn_return_to_samples.setToolTip(
+            "Leave Analysis and return to the sample preview workflow."
+        )
+        self.btn_return_to_samples.clicked.connect(self._on_return_to_samples)
+        analysis_tab_layout.addWidget(self.btn_return_to_samples)
         analysis_tab_layout.addStretch()
         self._right_tabs.addTab(analysis_tab, "Analysis")
 
@@ -681,10 +753,13 @@ class MainWindow(QMainWindow):
     def _build_samples_panel(self) -> QWidget:
         panel = QWidget()
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(0, 0, 0, 0)
-        self.lbl_workspace = QLabel("Workspace: —")
-        self.lbl_workspace.setWordWrap(True)
-        self.lbl_workspace.setStyleSheet("color: #888; font-size: 11px;")
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
+        self.lbl_workspace = QLabel("—")
+        self.lbl_workspace.setWordWrap(False)
+        self.lbl_workspace.setStyleSheet(
+            "color: #9da5b4; font-size: 10px; padding: 2px 0 6px 0;"
+        )
         layout.addWidget(self.lbl_workspace)
         self.combo_filter_group = QComboBox()
         self.combo_filter_group.setVisible(False)
@@ -693,7 +768,7 @@ class MainWindow(QMainWindow):
         self.lbl_explorer_empty.setStyleSheet("color: #aaaaaa; font-size: 11px;")
         self.lbl_explorer_empty.setVisible(False)
         layout.addWidget(self.lbl_explorer_empty)
-        self.tree_samples = QTreeWidget()
+        self.tree_samples = ExplorerTreeWidget()
         self.tree_samples.setHeaderHidden(True)
         self.tree_samples.setRootIsDecorated(True)
         self.tree_samples.setAlternatingRowColors(False)
@@ -714,12 +789,19 @@ class MainWindow(QMainWindow):
         self.tree_samples.customContextMenuRequested.connect(
             self._on_explorer_context_menu
         )
+        self.tree_samples.sample_drop_requested.connect(
+            self._on_explorer_sample_dropped
+        )
         layout.addWidget(self.tree_samples, stretch=1)
         return panel
 
-    def _build_frame_panel(self) -> QGroupBox:
-        box = QGroupBox("Frame")
-        layout = QVBoxLayout(box)
+    def _build_hidden_frame_controls(self) -> QWidget:
+        """Frame index widgets kept for navigation logic; not shown in the sidebar."""
+        host = QWidget()
+        host.setFixedHeight(0)
+        host.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+        layout = QVBoxLayout(host)
+        layout.setContentsMargins(0, 0, 0, 0)
         self.lbl_frame_info = QLabel("Frame: —")
         self.slider_frame = QSlider(Qt.Orientation.Horizontal)
         self.slider_frame.valueChanged.connect(self._on_frame_slider)
@@ -728,17 +810,16 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.lbl_frame_info)
         layout.addWidget(self.slider_frame)
         layout.addWidget(self.spin_frame)
-        return box
+        return host
 
-    def _build_selected_panel(self) -> QGroupBox:
-        box = QGroupBox("Selected Data File")
+    def _build_export_name_panel(self) -> QGroupBox:
+        box = QGroupBox("Export Name")
         layout = QVBoxLayout(box)
-        self.lbl_selected_file = QLabel("No data selected")
-        self.lbl_selected_file.setWordWrap(True)
-        layout.addWidget(self.lbl_selected_file)
         layout.addWidget(QLabel("Export name:"))
         self.edit_export_name = QLineEdit()
-        self.edit_export_name.setPlaceholderText("auto-generated from condition group and sample")
+        self.edit_export_name.setPlaceholderText(
+            "auto-generated from condition group and sample"
+        )
         self.edit_export_name.editingFinished.connect(self._on_export_name_edited)
         layout.addWidget(self.edit_export_name)
         self.lbl_auto_export_name = QLabel("Auto name: —")
@@ -771,6 +852,9 @@ class MainWindow(QMainWindow):
         self.spin_custom_angle = QDoubleSpinBox()
         self.spin_custom_angle.setRange(-180, 180)
         self.spin_custom_angle.setDecimals(1)
+        self.spin_custom_angle.setButtonSymbols(
+            QAbstractSpinBox.ButtonSymbols.NoButtons
+        )
         self._configure_orient_roi_control(self.spin_custom_angle)
         self.btn_apply_custom = QPushButton("Apply")
         self.btn_apply_custom.clicked.connect(self._on_apply_custom_angle)
@@ -807,17 +891,19 @@ class MainWindow(QMainWindow):
         self.btn_clear_roi.clicked.connect(self._on_clear_roi)
         layout.addWidget(self.btn_clear_roi)
 
+        self.lbl_roi_save_status = QLabel("—")
+        self.lbl_roi_save_status.setWordWrap(True)
+        self._set_roi_save_status("No ROI saved yet", saved=False)
+        layout.addWidget(self.lbl_roi_save_status)
+
+        layout.addStretch()
+        layout.addWidget(self._build_export_name_panel())
         self.btn_process = self._tool_button(
             "Export ROI",
             "Crop and export processed outputs to the processed/ folder.",
             self._on_process_sample,
         )
         layout.addWidget(self.btn_process)
-
-        self.lbl_roi_save_status = QLabel("—")
-        self.lbl_roi_save_status.setWordWrap(True)
-        self._set_roi_save_status("No ROI saved yet", saved=False)
-        layout.addWidget(self.lbl_roi_save_status)
         return box
 
     @staticmethod
@@ -1252,6 +1338,7 @@ class MainWindow(QMainWindow):
             self.spin_frame.setMaximum(0)
             self.slider_frame.setValue(0)
             self.spin_frame.setValue(0)
+            self._reset_sample_frame_ui()
             self._preview_mode = "no_sample"
         else:
             self._preview_mode = "full"
@@ -1338,6 +1425,69 @@ class MainWindow(QMainWindow):
         self._refresh_sample_list()
         self._status("Explorer refreshed from workspace metadata.")
 
+    def _on_explorer_sample_dropped(
+        self, sample_id: str, target_condition_group_id: str
+    ) -> None:
+        if self._project_root is None:
+            return
+        if sample_id in self._metrics_inflight:
+            QMessageBox.warning(
+                self,
+                "Move Sample",
+                "Wait for metric analysis to finish before moving this Sample.",
+            )
+            return
+        from actintrack_app.sample_transfer import (
+            SampleMoveError,
+            move_sample_to_condition_group,
+        )
+
+        try:
+            result = move_sample_to_condition_group(
+                self._project_root,
+                sample_id,
+                target_condition_group_id,
+            )
+        except SampleMoveError as exc:
+            QMessageBox.critical(self, "Move Sample", str(exc))
+            return
+        except OSError as exc:
+            QMessageBox.critical(
+                self,
+                "Move Sample",
+                f"Could not move Sample folders on disk:\n{exc}",
+            )
+            return
+
+        if not result.moved:
+            return
+
+        was_selected = str(self._current_sample_id or "") == sample_id
+        self._refresh_sample_list()
+        item = self._find_sample_tree_item(sample_id)
+        if item is not None:
+            self.tree_samples.setCurrentItem(item)
+            parent = item.parent()
+            if parent is not None:
+                parent.setExpanded(True)
+        elif was_selected:
+            self._set_active_sample(None)
+            self.reset_preview_state(
+                clear_image=True,
+                placeholder=self._SELECT_SAMPLE_HINT,
+            )
+
+        target_name = get_condition_group_name(
+            self._project_root, result.target_condition_group_id
+        )
+        self._status(f"Moved Sample to Condition Group: {target_name}")
+
+    def _on_return_to_samples(self) -> None:
+        for i in range(self._right_tabs.count()):
+            if self._right_tabs.tabText(i) == "Sample":
+                self._right_tabs.setCurrentIndex(i)
+                return
+
     def _on_right_tab_changed(self, index: int) -> None:
         if index < 0:
             return
@@ -1392,9 +1542,7 @@ class MainWindow(QMainWindow):
         group_id = str(
             sample.get("condition_group_id") or sample.get("group", "")
         ).strip()
-        batch_num = int(sample.get("batch_number", 1) or 1)
-        batch_name = str(sample.get("batch_name", "")).strip()
-        sample_label = display_sample_label(batch_num, batch_name)
+        sample_label = sample_sidebar_display_label(sample)
         if group_id:
             display = ""
             if self._project_root is not None:
@@ -1425,6 +1573,131 @@ class MainWindow(QMainWindow):
         if hasattr(self, "lbl_last_analyzed"):
             self.lbl_last_analyzed.setVisible(has_sample)
         self._update_metric_freshness_label()
+        self._update_playback_controls_state()
+
+    def _set_sample_playback_visible(self, visible: bool) -> None:
+        for widget in getattr(self, "_sample_playback_widgets", ()):
+            widget.setVisible(visible)
+
+    def _playback_loop_enabled(self) -> bool:
+        return bool(
+            hasattr(self, "chk_playback_loop") and self.chk_playback_loop.isChecked()
+        )
+
+    def _update_playback_controls_state(self) -> None:
+        if not hasattr(self, "btn_playback_play"):
+            return
+        can_show = (
+            self._current_sample_id is not None
+            and self._base_frame is not None
+            and not self._metric_analysis_view_active
+            and self._preview_mode == "full"
+        )
+        self._set_sample_playback_visible(can_show)
+        total = max(0, int(self._total_frames))
+        can_scrub = can_show and total > 0
+        can_play = can_show and total > 1
+        self.btn_playback_play.setEnabled(can_play)
+        self.btn_playback_pause.setEnabled(self._preview_playing)
+        if hasattr(self, "slider_sample_frame"):
+            self.slider_sample_frame.setEnabled(can_scrub)
+
+    @staticmethod
+    def _playback_interval_ms_for_speed_text(speed_text: str) -> int:
+        mult = _PLAYBACK_SPEED_MULTIPLIERS.get(str(speed_text), 1.0)
+        fps = max(1.0, _PLAYBACK_BASE_FPS * mult)
+        return max(20, int(1000.0 / fps))
+
+    def _sync_sample_frame_ui(self, index: int, total: int) -> None:
+        """Update visible sample playback widgets and hidden frame index controls."""
+        total = max(0, int(total))
+        index = max(0, min(int(index), max(0, total - 1)))
+        max_index = max(0, total - 1)
+        if hasattr(self, "lbl_sample_frame"):
+            if total <= 0:
+                self.lbl_sample_frame.setText("Frame —")
+            else:
+                self.lbl_sample_frame.setText(f"Frame {index + 1} / {total}")
+        if hasattr(self, "slider_sample_frame"):
+            self.slider_sample_frame.blockSignals(True)
+            self.slider_sample_frame.setMaximum(max_index)
+            self.slider_sample_frame.setValue(index)
+            self.slider_sample_frame.blockSignals(False)
+        if hasattr(self, "slider_frame"):
+            self.slider_frame.blockSignals(True)
+            self.spin_frame.blockSignals(True)
+            self.slider_frame.setMaximum(max_index)
+            self.spin_frame.setMaximum(max_index)
+            self.slider_frame.setValue(index)
+            self.spin_frame.setValue(index)
+            self.slider_frame.blockSignals(False)
+            self.spin_frame.blockSignals(False)
+
+    def _reset_sample_frame_ui(self) -> None:
+        if hasattr(self, "lbl_sample_frame"):
+            self.lbl_sample_frame.setText("Frame —")
+        if hasattr(self, "slider_sample_frame"):
+            self.slider_sample_frame.blockSignals(True)
+            self.slider_sample_frame.setMaximum(0)
+            self.slider_sample_frame.setValue(0)
+            self.slider_sample_frame.blockSignals(False)
+
+    def _on_sample_frame_slider(self, value: int) -> None:
+        if self._preview_mode != "full" or self._base_frame is None:
+            return
+        if self._preview_playing:
+            self._playback_pause()
+        self._load_frame_index(int(value))
+
+    def _on_sample_playback_speed_changed(self, _text: str) -> None:
+        if self._preview_playing and self._preview_mode == "full":
+            self._update_playback_timer_interval()
+
+    def _playback_interval_ms(self) -> int:
+        if self._preview_mode == "cropped_tracking":
+            return self._playback_interval_ms_for_speed_text(
+                self.combo_preview_speed.currentText()
+            )
+        return self._playback_interval_ms_for_speed_text(
+            self.combo_sample_playback_speed.currentText()
+        )
+
+    def _playback_play(self) -> None:
+        if self._preview_mode == "cropped_tracking" and self._cropped_preview is not None:
+            if len(self._cropped_preview.frames) <= 1:
+                return
+            self._preview_playing = True
+            self._update_playback_timer_interval()
+            self._update_playback_controls_state()
+            return
+        if self._preview_mode != "full" or self._base_frame is None:
+            return
+        if self._total_frames <= 1:
+            return
+        self._preview_playing = True
+        self._update_playback_timer_interval()
+        self._update_playback_controls_state()
+
+    def _update_playback_timer_interval(self) -> None:
+        if self._preview_playing:
+            self._preview_timer.start(self._playback_interval_ms())
+
+    def _on_preview_speed_changed(self, _text: str) -> None:
+        if self._preview_playing:
+            self._update_playback_timer_interval()
+
+    def _playback_pause(self) -> None:
+        self._preview_playing = False
+        self._preview_timer.stop()
+        self._update_playback_controls_state()
+
+    def _preview_play(self) -> None:
+        """Backward-compatible alias."""
+        self._playback_play()
+
+    def _preview_pause(self) -> None:
+        """Backward-compatible alias."""
+        self._playback_pause()
 
     def _clear_metric_preview_state(self) -> None:
         self._clear_sample_specific_metric_state()
@@ -3016,61 +3289,50 @@ class MainWindow(QMainWindow):
         self._set_preview_mode_banner(None)
         self._update_metric_analysis_button_visibility()
         if self._base_frame is not None:
-            self.slider_frame.setMaximum(max(0, self._total_frames - 1))
-            self.spin_frame.setMaximum(max(0, self._total_frames - 1))
-            self.slider_frame.setValue(self._frame_index)
-            self.spin_frame.setValue(self._frame_index)
+            self._sync_sample_frame_ui(self._frame_index, self._total_frames)
             self._refresh_display(keep_roi=True)
 
     def _preview_playback_interval_ms(self) -> int:
-        speed_map = {
-            "0.25×": 0.25,
-            "0.5×": 0.5,
-            "1×": 1.0,
-            "1.5×": 1.5,
-            "2×": 2.0,
-        }
-        mult = speed_map.get(self.combo_preview_speed.currentText(), 1.0)
-        fps = max(1.0, 5.0 * mult)
-        return max(20, int(1000.0 / fps))
-
-    def _preview_play(self) -> None:
-        if self._preview_mode != "cropped_tracking" or self._cropped_preview is None:
-            return
-        self._preview_playing = True
-        self._update_preview_timer_interval()
-
-    def _update_preview_timer_interval(self) -> None:
-        if self._preview_playing:
-            self._preview_timer.start(self._preview_playback_interval_ms())
-
-    def _on_preview_speed_changed(self, _text: str) -> None:
-        if self._preview_mode != "cropped_tracking":
-            return
-        self._update_preview_timer_interval()
-
-    def _preview_pause(self) -> None:
-        self._preview_playing = False
-        self._preview_timer.stop()
+        return self._playback_interval_ms_for_speed_text(
+            self.combo_preview_speed.currentText()
+        )
 
     def _on_preview_timer_tick(self) -> None:
-        if self._cropped_preview is None:
-            self._preview_pause()
+        if self._preview_mode == "cropped_tracking" and self._cropped_preview is not None:
+            count = len(self._cropped_preview.frames)
+            if count <= 1:
+                self._playback_pause()
+                return
+            next_index = self._preview_frame_index + 1
+            if next_index >= count:
+                if self._playback_loop_enabled():
+                    next_index = 0
+                else:
+                    self._playback_pause()
+                    return
+            self._show_cropped_preview_frame(next_index)
             return
-        count = len(self._cropped_preview.frames)
-        if count <= 1:
-            self._preview_pause()
+        if self._preview_mode == "full" and self._base_frame is not None:
+            total = max(1, int(self._total_frames))
+            if total <= 1:
+                self._playback_pause()
+                return
+            next_index = int(self._frame_index) + 1
+            if next_index >= total:
+                if self._playback_loop_enabled():
+                    next_index = 0
+                else:
+                    self._playback_pause()
+                    return
+            self._load_frame_index(next_index)
             return
-        next_index = self._preview_frame_index + 1
-        if next_index >= count:
-            next_index = 0
-        self._show_cropped_preview_frame(next_index)
+        self._playback_pause()
 
     def _on_cropped_preview_frame_slider(self, value: int) -> None:
         if self._preview_mode != "cropped_tracking" or self._cropped_preview is None:
             return
         if self._preview_playing:
-            self._preview_pause()
+            self._playback_pause()
         self._show_cropped_preview_frame(value)
 
     def _show_cropped_preview_frame(self, index: int) -> None:
@@ -4067,9 +4329,18 @@ class MainWindow(QMainWindow):
 
     def _update_workspace_label(self) -> None:
         if self._project_root is None:
-            self.lbl_workspace.setText("Workspace: —")
+            self.lbl_workspace.setText("—")
+            self.lbl_workspace.setToolTip("")
             return
-        self.lbl_workspace.setText(f"Workspace:\n{self._project_root}")
+        path = str(self._project_root)
+        self.lbl_workspace.setToolTip(path)
+        width = 240
+        if hasattr(self, "_left_sidebar") and self._left_sidebar.isVisible():
+            width = max(120, self._left_sidebar.width() - 12)
+        elided = self.lbl_workspace.fontMetrics().elidedText(
+            path, Qt.TextElideMode.ElideMiddle, width
+        )
+        self.lbl_workspace.setText(elided)
 
     def _default_import_dir(self) -> Path:
         if self._last_import_dir.exists():
@@ -4303,7 +4574,6 @@ class MainWindow(QMainWindow):
             self._refresh_sample_list()
 
     def _clear_preview_pane(self) -> None:
-        self.lbl_selected_file.setText("No data selected.")
         self.lbl_auto_export_name.setText("Auto name: —")
         self.edit_export_name.clear()
         self.reset_preview_state(
@@ -4337,6 +4607,7 @@ class MainWindow(QMainWindow):
 
         was_metric_analysis_view = self._metric_analysis_view_active
         resume_playback = self._preview_playing if was_metric_analysis_view else False
+        self._playback_pause()
 
         prev_sid = self._current_sample_id
         new_sid = str(data.get("sample_id", "")).strip() or None
@@ -4453,15 +4724,9 @@ class MainWindow(QMainWindow):
         self, sid: str, frame: np.ndarray, idx: int, total: int
     ) -> None:
         assert self._current_sample is not None
-        self.slider_frame.setMaximum(max(0, total - 1))
-        self.spin_frame.setMaximum(max(0, total - 1))
-        self.slider_frame.setValue(idx)
-        self.spin_frame.setValue(idx)
+        self._sync_sample_frame_ui(idx, total)
         h, w = frame.shape[:2]
         self.lbl_frame_info.setText(f"Frame {idx}/{max(0, total-1)} ({w}×{h})")
-        self.lbl_selected_file.setText(
-            f"{sid}\n{self._current_sample['original_filename']}"
-        )
         auto_name = (
             display_export_name_for_row(self._project_root, self._current_sample)
             if self._project_root is not None
@@ -4473,6 +4738,7 @@ class MainWindow(QMainWindow):
         self.edit_export_name.blockSignals(True)
         self.edit_export_name.setText(final_name)
         self.edit_export_name.blockSignals(False)
+        self._update_playback_controls_state()
 
     def _load_sample_data_context(self, *, render_full_preview: bool = True) -> bool:
         path = self._sample_file_path()
@@ -4535,7 +4801,7 @@ class MainWindow(QMainWindow):
     def _load_frame_index(self, index: int) -> None:
         if self._preview_mode == "cropped_tracking" and self._cropped_preview is not None:
             if self._preview_playing:
-                self._preview_pause()
+                self._playback_pause()
             self._show_cropped_preview_frame(index)
             return
         path = self._sample_file_path()
@@ -4559,6 +4825,8 @@ class MainWindow(QMainWindow):
                 )
         h, w = frame.shape[:2]
         self.lbl_frame_info.setText(f"Frame {idx}/{max(0, total-1)} ({w}×{h})")
+        self._sync_sample_frame_ui(idx, total)
+        self._update_playback_controls_state()
 
     def _refresh_recent_menu(self) -> None:
         refresh_recent_workspaces_menu(self)

@@ -9,6 +9,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from actintrack_app.batch_manager import rename_batch
 from actintrack_app.condition_group_manager import (
     create_condition_group,
     rename_condition_group,
@@ -21,8 +22,10 @@ from actintrack_app.explorer_sidebar import (
     sample_tree_meta,
     tree_item_condition_group_id,
 )
+from actintrack_app.metadata import load_samples_csv
 from actintrack_app.project_manager import create_project_structure
 from actintrack_app.sample_service import create_sample_from_data
+from actintrack_app.utils import METADATA_DIR, SAMPLES_CSV
 
 
 def _write_test_video(path: Path, frames: int = 3) -> None:
@@ -113,6 +116,24 @@ class ExplorerSidebarLabelTests(unittest.TestCase):
             rename_condition_group(root, record.id, "LatB Treatment")
             self.assertEqual(before, "02_676-6-2.mp4")
             self.assertEqual(sample_sidebar_display_label(row_dict), before)
+
+    def test_rename_sample_updates_explorer_label_preserves_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            create_project_structure(root)
+            record = create_condition_group(root, "Control")
+            video = root / "clip.mp4"
+            _write_test_video(video)
+            batch, row = create_sample_from_data(root, record.id, video)
+            row_dict = row if isinstance(row, dict) else dict(row)
+            self.assertEqual(sample_sidebar_display_label(row_dict), "clip.mp4")
+
+            rename_batch(root, record.id, batch["batch_name"], "Renamed Sample")
+            df = load_samples_csv(root / METADATA_DIR / SAMPLES_CSV)
+            updated = df[df["sample_id"].astype(str) == str(row_dict["sample_id"])].iloc[0]
+            updated_dict = {str(k): str(v) for k, v in updated.items()}
+            self.assertEqual(updated_dict["original_filename"], "clip.mp4")
+            self.assertEqual(sample_sidebar_display_label(updated_dict), "Renamed Sample")
 
 
 if __name__ == "__main__":
