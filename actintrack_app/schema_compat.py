@@ -285,6 +285,8 @@ def _normalize_annotation_keys(ann: dict[str, Any]) -> dict[str, Any]:
             out.setdefault("data_id", sid)
     if "breed" not in out and out.get("group"):
         out["breed"] = out["group"]
+    if "condition_group_id" not in out and out.get("group"):
+        out["condition_group_id"] = out["group"]
     if "sample_name" not in out and out.get("batch_name"):
         out["sample_name"] = out["batch_name"]
     if "sample_id" not in out and out.get("batch_id"):
@@ -385,8 +387,10 @@ def migrate_workspace_to_v2(root: Path) -> bool:
 
 def migrate_workspace_schema(root: Path) -> None:
     """Run legacy v1 repairs then upgrade to v2 when needed."""
+    from actintrack_app.condition_group_manager import ensure_condition_groups_initialized
     from actintrack_app.metadata import _migrate_workspace_schema_v1
 
     root = Path(root).resolve()
     _migrate_workspace_schema_v1(root)
     migrate_workspace_to_v2(root)
+    ensure_condition_groups_initialized(root)

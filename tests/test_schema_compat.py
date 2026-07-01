@@ -103,6 +103,9 @@ class SchemaCompatTests(unittest.TestCase):
             create_project_structure(root)
             self.assertEqual(read_workspace_schema_version(root), SCHEMA_V2)
             self.assertTrue((root / METADATA_DIR / DATA_FILES_CSV).is_file())
+            from actintrack_app.condition_group_manager import list_condition_group_records
+
+            self.assertEqual(list_condition_group_records(root), [])
 
     def test_migrate_workspace_schema_end_to_end(self) -> None:
         migrate_workspace_schema(self.root)
@@ -110,7 +113,8 @@ class SchemaCompatTests(unittest.TestCase):
         raw = json.loads(
             (self.root / METADATA_DIR / SAMPLE_REGISTRY_JSON).read_text(encoding="utf-8")
         )
-        self.assertIn("1_WT_218", raw)
+        self.assertTrue(any("1_WT_218" in str(v) for v in raw.values()))
+        self.assertTrue(all(str(k).startswith("cg_") for k in raw.keys()))
 
 
 class SmokeTests(unittest.TestCase):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -315,6 +316,57 @@ def create_sample_from_data(
     )
     batch = get_batch_by_name(root, breed, batch["batch_name"]) or batch
     return batch, records[0]
+
+
+@dataclass(frozen=True)
+class SampleImportResult:
+    source_path: Path
+    batch: dict[str, Any] | None = None
+    row: dict[str, Any] | None = None
+    error: str | None = None
+
+    @property
+    def succeeded(self) -> bool:
+        return self.error is None and self.batch is not None
+
+
+def create_samples_from_data_files(
+    root: Path,
+    breed: str,
+    source_paths: list[Path],
+    *,
+    notes: str = "",
+) -> list[SampleImportResult]:
+    """Import multiple AVI/MP4 files into one Condition Group (one Sample per file)."""
+    if not source_paths:
+        return []
+    results: list[SampleImportResult] = []
+    for source_path in source_paths:
+        src = Path(source_path)
+        try:
+            batch, row = create_sample_from_data(root, breed, src, notes=notes)
+        except ValueError as exc:
+            results.append(SampleImportResult(source_path=src, error=str(exc)))
+            continue
+        except (MediaLoadError, OSError) as exc:
+            results.append(SampleImportResult(source_path=src, error=str(exc)))
+            continue
+        results.append(SampleImportResult(source_path=src, batch=batch, row=row))
+    return results
+
+
+def format_sample_import_summary(
+    results: list[SampleImportResult],
+    *,
+    total_selected: int | None = None,
+) -> str:
+    total = total_selected if total_selected is not None else len(results)
+    successes = sum(1 for r in results if r.succeeded)
+    lines = [f"Imported {successes} of {total} files."]
+    for result in results:
+        if result.error:
+            lines.append(f"• {result.source_path.name}: {result.error}")
+    return "\n".join(lines)
 
 
 def replace_sample_data(

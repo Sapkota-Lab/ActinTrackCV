@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from actintrack_app.utils import GROUPS, METADATA_DIR, PROCESSED_DIR, RAW_DIR, VIDEO_EXTENSIONS
+from actintrack_app.utils import METADATA_DIR, PROCESSED_DIR, RAW_DIR, VIDEO_EXTENSIONS
 
 
 BATCHES_JSON = "batches.json"
@@ -107,6 +107,11 @@ def allocate_next_batch(
         parsed = _canonical_batch_number_from_name(name)
         if parsed is not None:
             num = parsed
+        base = name
+        suffix = 2
+        while sanitize_batch_name(name) in existing_names:
+            name = sanitize_batch_name(f"{base}_{suffix}")
+            suffix += 1
     else:
         name = display_batch_name(num)
         while sanitize_batch_name(name) in existing_names:
@@ -146,6 +151,8 @@ def _normalize_batch_record(entry: dict[str, Any], group: str) -> dict[str, Any]
         name = display_batch_name(batch_number)
     out = {
         "group": str(entry.get("group", group)),
+        "condition_group_id": str(entry.get("condition_group_id", group)),
+        "breed": str(entry.get("breed") or entry.get("group", group)),
         "batch_number": batch_number,
         "batch_name": sanitize_batch_name(name),
         "batch_id": str(entry.get("batch_id", _batch_id(group, batch_number))),
@@ -214,6 +221,8 @@ def create_batch(
     *,
     batch_number: int | None = None,
 ) -> dict[str, Any]:
+    from actintrack_app.condition_group_manager import get_condition_group_name
+
     root = Path(root).resolve()
     registry = _load_batches_registry(root)
     group_batches = list(registry.get(group, []))
@@ -225,8 +234,11 @@ def create_batch(
     if any(sanitize_batch_name(b.get("batch_name", "")) == name for b in group_batches):
         raise ValueError(f"Sample name already exists in {group}: {name}")
 
+    display = get_condition_group_name(root, group)
     record = {
         "group": group,
+        "condition_group_id": group,
+        "breed": display,
         "batch_number": num,
         "batch_name": name,
         "batch_id": _batch_id(group, num),
@@ -444,28 +456,19 @@ def batch_has_samples(root: Path, group: str, batch_name: str) -> bool:
 
 
 def all_workspace_condition_groups(root: Path) -> list[str]:
-    """All condition groups that may have batch registry or sample metadata."""
-    from actintrack_app.metadata import load_samples_csv
-    from actintrack_app.utils import SAMPLES_CSV
+    """All condition group IDs in the workspace."""
+    from actintrack_app.condition_group_manager import list_condition_group_ids
 
-    root = Path(root).resolve()
-    groups: set[str] = set(GROUPS)
-    groups.update(_load_batches_registry(root).keys())
-    samples_path = root / METADATA_DIR / SAMPLES_CSV
-    if samples_path.is_file():
-        df = load_samples_csv(samples_path)
-        if not df.empty and "group" in df.columns:
-            groups.update(
-                g for g in df["group"].astype(str).tolist() if str(g).strip()
-            )
-    return sorted(groups)
+    return list_condition_group_ids(root)
 
 
 def clear_batches_registry_for_groups(root: Path, groups: list[str] | None = None) -> int:
     """Remove all batch entries for the given groups (or every known group)."""
     root = Path(root).resolve()
     registry = _load_batches_registry(root)
-    target = set(groups) if groups is not None else set(GROUPS) | set(registry.keys())
+    target = set(groups) if groups is not None else set(_load_batches_registry(root).keys()) | set(
+        all_workspace_condition_groups(root)
+    )
     removed = 0
     for group in target:
         removed += len(registry.get(group, []))
@@ -475,8 +478,8 @@ def clear_batches_registry_for_groups(root: Path, groups: list[str] | None = Non
 
 
 def reset_batches_registry_workspace(root: Path) -> None:
-    """Empty batch lists for every standard condition group (post workspace purge)."""
-    _save_batches_registry(root, {g: [] for g in GROUPS})
+    """Empty the sample registry after a full workspace purge."""
+    _save_batches_registry(root, {})
 
 
 def prune_registry_batches_without_samples(
@@ -609,7 +612,7 @@ def delete_empty_batch(
 def sync_registry_from_samples(root: Path) -> int:
     """Add missing batches.json entries from samples.csv; never removes entries."""
     from actintrack_app.metadata import load_samples_csv
-    from actintrack_app.utils import GROUP_PREFIX, SAMPLES_CSV
+    from actintrack_app.utils import SAMPLES_CSV, data_id_prefix_for_group
 
     root = Path(root).resolve()
     df = load_samples_csv(root / METADATA_DIR / SAMPLES_CSV)
@@ -644,7 +647,7 @@ def sync_registry_from_samples(root: Path) -> int:
             pass
         batch_id = str(row.get("batch_id", "")).strip()
         if not batch_id:
-            prefix = GROUP_PREFIX.get(group, "B")
+            prefix = data_id_prefix_for_group(group)
             num = batch_number or parse_batch_number_from_name(safe) or 1
             batch_id = f"{prefix}_B{num:03d}"
         register_batch_from_samples(

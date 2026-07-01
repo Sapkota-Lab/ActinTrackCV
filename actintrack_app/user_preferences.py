@@ -6,7 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-from actintrack_app.utils import GROUPS, METADATA_DIR
+from actintrack_app.condition_group_manager import condition_group_exists
+from actintrack_app.utils import METADATA_DIR
 
 USER_PREFERENCES_JSON = "user_preferences.json"
 
@@ -39,13 +40,13 @@ def save_preferences(root: Path, prefs: dict[str, Any]) -> None:
 
 def get_last_import_breed(root: Path) -> str | None:
     breed = str(load_preferences(root).get("last_import_breed", "")).strip()
-    if breed in GROUPS:
+    if breed and condition_group_exists(root, breed):
         return breed
     return None
 
 
 def set_last_import_breed(root: Path, breed: str) -> None:
-    if breed not in GROUPS:
+    if not condition_group_exists(root, breed):
         return
     prefs = load_preferences(root)
     prefs["last_import_breed"] = breed

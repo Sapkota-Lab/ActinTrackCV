@@ -8,7 +8,6 @@ from pathlib import Path
 from actintrack_app.utils import (
     CROP_METADATA_JSON,
     DATA_FILES_CSV,
-    GROUPS,
     METADATA_DIR,
     PREVIEWS_DIR,
     PROCESSED_DIR,
@@ -26,11 +25,6 @@ def create_project_structure(root_dir: Path) -> None:
     for sub in (RAW_DIR, PROCESSED_DIR, METADATA_DIR, PREVIEWS_DIR):
         (root / sub).mkdir(exist_ok=True)
 
-    for group in GROUPS:
-        (root / RAW_DIR / group).mkdir(parents=True, exist_ok=True)
-        (root / PROCESSED_DIR / group).mkdir(parents=True, exist_ok=True)
-        (root / PREVIEWS_DIR / group).mkdir(parents=True, exist_ok=True)
-
     metadata_dir = root / METADATA_DIR
     crop_meta_path = metadata_dir / CROP_METADATA_JSON
     data_files_path = metadata_dir / DATA_FILES_CSV
@@ -38,6 +32,7 @@ def create_project_structure(root_dir: Path) -> None:
     if not data_files_path.exists() and not (metadata_dir / SAMPLES_CSV).exists():
         import pandas as pd
 
+        from actintrack_app.condition_group_manager import init_empty_condition_groups
         from actintrack_app.schema_compat import (
             save_data_files,
             save_sample_registry,
@@ -47,7 +42,8 @@ def create_project_structure(root_dir: Path) -> None:
 
         write_workspace_json(root, schema_version=SCHEMA_V2)
         save_data_files(root, pd.DataFrame(columns=SAMPLES_CSV_COLUMNS))
-        save_sample_registry(root, {g: [] for g in GROUPS})
+        save_sample_registry(root, {})
+        init_empty_condition_groups(root)
 
     if not crop_meta_path.exists():
         crop_meta_path.write_text(

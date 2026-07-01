@@ -24,7 +24,7 @@ Use this short path when starting a new analysis session.
 
 1. Open ActinTrackCV and open or create a workspace.
 2. Select a Condition Group in the left panel.
-3. Choose Sample -> Add Sample, then select one AVI or MP4 data file.
+3. Choose Sample -> Add Sample, then select one or more AVI or MP4 data files. Each file becomes one Sample in the selected Condition Group.
 4. Orient the image and draw a rectangular ROI around the actin-rich region.
 5. Click Preview Cropped ROI to inspect the crop and run draft tracking.
 6. Review the Tracking Result panel.
@@ -44,7 +44,7 @@ On macOS or Linux, `./run_app.sh` is also available. On Windows, use `run_app.ba
 
 | Term | Meaning |
 |------|---------|
-| Condition Group | A researcher-defined experimental grouping such as a genotype/breed, chemical treatment, control, mutant, environmental condition, or other experimental setup (e.g. `1_WT_218` or `3_Mutant_515`). In the current app these Condition Groups are selected from a fixed list. |
+| Condition Group | A researcher-defined experimental grouping such as a genotype, chemical treatment, control, mutant, environmental condition, or other experimental setup (e.g. `Control` or `LatB Treatment`). You create custom names per workspace. |
 | Sample | One imported AVI/MP4 data file plus its project state: ROI, orientation, notes, tracking result, and analysis status. |
 | Data | The AVI/MP4 file selected by the user for a Sample. The app stores a project-managed internal copy so the workspace can be reopened later. |
 | ROI | Region of interest. A rectangle drawn around the actin-rich area to analyze. |
@@ -73,26 +73,29 @@ Select Condition Group
 | Step | What you do | What the app stores or updates |
 |------|-------------|--------------------------------|
 | Select Condition Group | Choose the experimental group in the left panel. | The Sample list filters to that Condition Group. |
-| Add Sample | Select one AVI or MP4 file. | A Sample record, project-managed internal data copy, and metadata row. |
+| Add Sample | Select one or more AVI or MP4 files. | One Sample per file: a Sample record, project-managed internal data copy, and metadata row. |
 | Orient and ROI | Rotate/flip as needed and draw the rectangle around the intended actin-rich region. | ROI and orientation metadata. ROI changes autosave. |
 | Preview Cropped ROI | Start the cropped ROI/tracking preview. | Draft tracking/index result for the current Sample. |
 | Review Tracking Result | Compare the displayed values with visual motion in the preview. | No extra action is needed for the draft result to appear in Analysis. |
 | Analysis | Open the Analysis tab/menu item. | Analysis reads saved results and aggregates by Condition Group and Sample. |
 
-### Condition Group selection
+### Condition Groups
 
-The current app uses these fixed Condition Groups:
+New workspaces start with no Condition Groups. Create one before adding Samples:
 
-| Condition Group | Biological meaning |
-|-------|--------------------|
-| `1_WT_218` | Wild Type 218 |
-| `2_WT_550` | Wild Type 550 |
-| `3_Mutant_515` | Mutant 515 |
-| `4_Mutant_175` | Mutant 175 |
+1. **Workspace → New Condition Group…** (or **New Group** in the left panel)
+2. Enter a custom name such as `Control`, `LatB Treatment`, or `Mutant + Chemical`
+3. Select the group in the **Condition Group** dropdown before **Add Sample**
+
+Use **Rename** or **Workspace → Rename Condition Group…** to change a group name. Samples stay assigned to the renamed group.
+
+Use **Delete** or **Workspace → Delete Condition Group…** to remove an **empty** group. Deletion is blocked while the group still has Samples or Data.
+
+Older workspaces that used legacy preset folder names (for example `1_WT_218`) still load those groups automatically.
 
 ### Adding a Sample
 
-Use Sample -> Add Sample, or right-click the empty area in the Sample list and choose Add Sample. Select one AVI or MP4 data file. If the file cannot be read, no Sample is created.
+Create a Condition Group first. Then use Sample -> Add Sample, or right-click the empty area in the Sample list and choose Add Sample. Select one or more AVI or MP4 data files. Each file becomes one Sample in the selected Condition Group. If a file cannot be read, that file is skipped and reported in an import summary; successfully imported Samples remain.
 
 ### Replacing Data
 
@@ -109,7 +112,7 @@ Deleting a Sample removes the Sample from the project, including ROI, tracking r
 | App area | What it is for | Notes |
 |----------|----------------|-------|
 | Condition Group/Sample list | Select the Condition Group and current Sample. | Right-click a Sample header or data row to rename, delete, or replace the Sample. |
-| Add Sample flow | Choose one AVI/MP4 file to create a Sample. | Canceling the file picker creates nothing. |
+| Add Sample flow | Choose one or more AVI/MP4 files to create Samples. | Canceling the file picker creates nothing. Partial failures show a summary; successful imports are kept. |
 | Orientation/ROI preview | View the full frame, rotate/flip if needed, and draw the ROI. | ROI autosaves; there is no Save ROI button. |
 | Cropped ROI preview | Loop the cropped ROI and inspect draft tracking overlay. | Includes Play/Pause, frame slider, speed control, and Return to Full Preview. |
 | Advanced Tracking Settings | Adjust draft tracking parameters. | Editable only during cropped ROI preview. |
@@ -351,7 +354,7 @@ Use visual inspection and metadata checks together.
 | Problem | Likely cause | Suggested fix |
 |---------|--------------|---------------|
 | Data will not load | File is not AVI/MP4, the file is unreadable, or the path is missing. | Re-export as AVI/MP4 or choose a readable file. Confirm it opens outside the app. |
-| Add Sample creates nothing | The file picker was canceled or validation failed. | Select one valid AVI/MP4 file. |
+| Add Sample creates nothing | The file picker was canceled or every selected file failed validation. | Select one or more valid AVI/MP4 files. Check the import summary for per-file errors. |
 | ROI appears wrong | Orientation changed, ROI was drawn on the wrong area, or the crop is too large/small. | Return to full preview, adjust orientation, redraw ROI, and visually verify. |
 | Cropped preview is blank | ROI may be outside the visible signal, too small, or on a low-signal region. | Redraw ROI around visible F-actin signal. |
 | Tracking result looks unrealistic | Low contrast, overlapping filaments, sample drift, or unsuitable tracking settings. | Visually inspect the preview, adjust tracking settings, and rerun Preview Cropped ROI. |

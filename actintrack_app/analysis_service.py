@@ -20,8 +20,8 @@ from actintrack_app.sample_registry import (
 from actintrack_app.export_naming import motion_index_summary_json_path
 from actintrack_app.metadata import load_samples_csv
 from actintrack_app.project_manager import get_processed_batch_dir
+from actintrack_app.condition_group_manager import list_condition_group_records
 from actintrack_app.utils import (
-    GROUPS,
     METADATA_DIR,
     SAMPLES_CSV,
     STATUS_MOTION_INDEX_FAILED,
@@ -451,11 +451,17 @@ def build_analysis_report(root: Path) -> AnalysisReport:
     breed_summaries: list[BreedSummaryRow] = []
     sample_details: list[SampleAnalysisRow] = []
 
-    breeds = [g for g in GROUPS]
+    from actintrack_app.condition_group_manager import (
+        get_condition_group_name,
+        list_condition_group_records,
+    )
+
     any_samples = False
 
-    for breed in breeds:
-        batches = list_samples(root, breed)
+    for record in list_condition_group_records(root):
+        gid = record.id
+        breed_display = record.name
+        batches = list_samples(root, gid)
         if batches:
             any_samples = True
 
@@ -463,17 +469,31 @@ def build_analysis_report(root: Path) -> AnalysisReport:
         for batch in batches:
             safe = sanitize_sample_name(str(batch.get("batch_name", "")))
             data_rows = []
-            if not df.empty and "group" in df.columns:
-                sub = df[
-                    (df["group"] == breed)
-                    & (df["batch_name"].astype(str).apply(sanitize_sample_name) == safe)
-                ]
+            if not df.empty:
+                if "condition_group_id" in df.columns:
+                    sub = df[
+                        (df["condition_group_id"].astype(str) == gid)
+                        & (
+                            df["batch_name"].astype(str).apply(sanitize_sample_name)
+                            == safe
+                        )
+                    ]
+                elif "group" in df.columns:
+                    sub = df[
+                        (df["group"].astype(str) == gid)
+                        & (
+                            df["batch_name"].astype(str).apply(sanitize_sample_name)
+                            == safe
+                        )
+                    ]
+                else:
+                    sub = df.iloc[0:0]
                 data_rows = [row.to_dict() for _, row in sub.iterrows()]
-            row = compute_sample_analysis(root, breed, batch, data_rows)
+            row = compute_sample_analysis(root, breed_display, batch, data_rows)
             breed_sample_rows.append(row)
             sample_details.append(row)
 
-        breed_summaries.append(compute_breed_analysis(breed, breed_sample_rows))
+        breed_summaries.append(compute_breed_analysis(breed_display, breed_sample_rows))
 
     empty_message = ""
     if not any_samples:

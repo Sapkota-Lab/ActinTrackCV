@@ -96,8 +96,9 @@ from actintrack_app.metadata import (
 from actintrack_app.purge_cleanup_dialog import pick_empty_batch_name
 from actintrack_app.sample_service import (
     DATA_IMPORT_FILTER,
-    create_sample_from_data,
+    create_samples_from_data_files,
     delete_sample_and_artifacts,
+    format_sample_import_summary,
     get_primary_data_row,
     replace_sample_data,
     sample_has_derived_state,
@@ -109,6 +110,17 @@ from actintrack_app.purge_manager import (
     purge_filtered_samples,
     purge_sample_annotations_only,
     purge_sample_completely,
+)
+from actintrack_app.condition_group_manager import (
+    condition_group_exists,
+    condition_group_display_name,
+    create_condition_group,
+    delete_empty_condition_group,
+    display_export_name_for_row,
+    get_condition_group_name,
+    list_condition_group_records,
+    rename_condition_group,
+    resolve_condition_group_id,
 )
 from actintrack_app.recent_workspaces import add_recent
 from actintrack_app.user_preferences import get_last_import_breed, set_last_import_breed
@@ -162,8 +174,6 @@ from actintrack_app.roi_workflow import (
 )
 from actintrack_app.utils import (
     CROP_METADATA_JSON,
-    GROUPS,
-    GROUP_PREFIX,
     METADATA_DIR,
     METRIC_DEBOUNCE_MS,
     RAW_DIR,
@@ -644,17 +654,36 @@ class MainWindow(QMainWindow):
         return stack
 
     def _build_samples_panel(self) -> QGroupBox:
-        box = QGroupBox("Samples (WT / Mutant lines)")
+        box = QGroupBox("Samples")
         layout = QVBoxLayout(box)
         self.lbl_workspace = QLabel("Workspace: —")
         self.lbl_workspace.setWordWrap(True)
         self.lbl_workspace.setStyleSheet("color: #888; font-size: 11px;")
         layout.addWidget(self.lbl_workspace)
         self.combo_filter_group = QComboBox()
-        self.combo_filter_group.addItems(list(GROUPS))
         self.combo_filter_group.currentTextChanged.connect(self._on_filter_group_changed)
         layout.addWidget(QLabel("Condition Group:"))
         layout.addWidget(self.combo_filter_group)
+        cg_row = QHBoxLayout()
+        self.btn_new_condition_group = self._tool_button(
+            "New Group",
+            "Create a custom Condition Group for this workspace.",
+            self._on_create_condition_group,
+        )
+        self.btn_rename_condition_group = self._tool_button(
+            "Rename",
+            "Rename the selected Condition Group.",
+            self._on_rename_condition_group,
+        )
+        self.btn_delete_condition_group = self._tool_button(
+            "Delete",
+            "Delete the selected Condition Group when it has no Samples.",
+            self._on_delete_condition_group,
+        )
+        cg_row.addWidget(self.btn_new_condition_group)
+        cg_row.addWidget(self.btn_rename_condition_group)
+        cg_row.addWidget(self.btn_delete_condition_group)
+        layout.addLayout(cg_row)
         self.list_samples = QListWidget()
         self.list_samples.setSelectionMode(
             QListWidget.SelectionMode.ExtendedSelection
@@ -1328,12 +1357,17 @@ class MainWindow(QMainWindow):
         sample = sample or self._current_sample
         if not sample:
             return ""
-        group = str(sample.get("group", "")).strip()
+        group_id = str(
+            sample.get("condition_group_id") or sample.get("group", "")
+        ).strip()
         batch_num = int(sample.get("batch_number", 1) or 1)
         batch_name = str(sample.get("batch_name", "")).strip()
         sample_label = display_sample_label(batch_num, batch_name)
-        if group:
-            return f"{group} / {sample_label}"
+        if group_id:
+            display = ""
+            if self._project_root is not None:
+                display = condition_group_display_name(self._project_root, sample)
+            return f"{display or group_id} / {sample_label}"
         return sample_label
 
     def _tracking_result_group_title(self, sample_id: Optional[str] = None) -> str:
@@ -1968,9 +2002,13 @@ class MainWindow(QMainWindow):
                 data = dict(self._current_sample)
                 data["item_type"] = "sample"
             status = str(data.get("processing_status", ""))
-            export_name = str(
-                data.get("final_export_name") or data.get("auto_export_name") or ""
-            ).strip()
+            export_name = (
+                display_export_name_for_row(self._project_root, data)
+                if self._project_root is not None
+                else str(
+                    data.get("final_export_name") or data.get("auto_export_name") or ""
+                ).strip()
+            )
             if not export_name:
                 export_name = str(data.get("sample_id", sample_id))
             original = str(data.get("original_filename", ""))
@@ -3551,20 +3589,161 @@ class MainWindow(QMainWindow):
                 clear_image=True,
                 placeholder=self._SELECT_SAMPLE_HINT,
             )
+            self._refresh_condition_group_combo()
             self._refresh_sample_list()
             self._status(f"{status_msg}: {root}")
         except OSError as e:
             QMessageBox.critical(self, "Project Error", str(e))
 
     def _set_last_import_breed(self, breed: str | None) -> None:
-        if not breed or breed not in GROUPS:
+        if not breed or self._project_root is None:
+            return
+        if not condition_group_exists(self._project_root, breed):
             return
         self._last_import_breed = breed
-        if self._project_root is not None:
-            set_last_import_breed(self._project_root, breed)
+        set_last_import_breed(self._project_root, breed)
+
+    def _current_condition_group(self) -> str | None:
+        """Return the selected stable condition_group_id, if any."""
+        if self._project_root is None:
+            return None
+        data = self.combo_filter_group.currentData()
+        if isinstance(data, str) and data.strip():
+            return resolve_condition_group_id(self._project_root, data)
+        text = self.combo_filter_group.currentText().strip()
+        if not text or text.startswith("("):
+            return None
+        return resolve_condition_group_id(self._project_root, text)
+
+    def _refresh_condition_group_combo(self, *, select: str | None = None) -> None:
+        if self._project_root is None:
+            self.combo_filter_group.blockSignals(True)
+            self.combo_filter_group.clear()
+            self.combo_filter_group.blockSignals(False)
+            return
+        records = list_condition_group_records(self._project_root)
+        preferred = select or self.combo_filter_group.currentData()
+        if not preferred and self._last_import_breed:
+            preferred = self._last_import_breed
+        self.combo_filter_group.blockSignals(True)
+        self.combo_filter_group.clear()
+        if records:
+            for record in records:
+                self.combo_filter_group.addItem(record.name, record.id)
+            idx = -1
+            if preferred:
+                idx = self.combo_filter_group.findData(preferred)
+                if idx < 0:
+                    resolved = resolve_condition_group_id(
+                        self._project_root, str(preferred)
+                    )
+                    if resolved:
+                        idx = self.combo_filter_group.findData(resolved)
+            if idx >= 0:
+                self.combo_filter_group.setCurrentIndex(idx)
+            else:
+                self.combo_filter_group.setCurrentIndex(0)
+        else:
+            self.combo_filter_group.addItem(
+                "(create a Condition Group first)",
+                "",
+            )
+            self.combo_filter_group.setCurrentIndex(0)
+        self.combo_filter_group.blockSignals(False)
+
+    def _on_create_condition_group(self) -> None:
+        if self._project_root is None:
+            QMessageBox.warning(
+                self,
+                "New Condition Group",
+                "Open or create a workspace first.",
+            )
+            return
+        name, ok = QInputDialog.getText(
+            self,
+            "New Condition Group",
+            "Condition Group name:",
+        )
+        if not ok:
+            return
+        try:
+            record = create_condition_group(self._project_root, name)
+        except ValueError as exc:
+            QMessageBox.warning(self, "New Condition Group", str(exc))
+            return
+        self._refresh_condition_group_combo(select=record.id)
+        self._refresh_sample_list()
+        self._status(f"Created Condition Group: {record.name}")
+
+    def _on_rename_condition_group(self) -> None:
+        if self._project_root is None:
+            return
+        current = self._current_condition_group()
+        if not current:
+            QMessageBox.information(
+                self,
+                "Rename Condition Group",
+                "Create or select a Condition Group first.",
+            )
+            return
+        current_name = get_condition_group_name(self._project_root, current)
+        new_name, ok = QInputDialog.getText(
+            self,
+            "Rename Condition Group",
+            "New name:",
+            text=current_name,
+        )
+        if not ok or not new_name.strip():
+            return
+        try:
+            renamed = rename_condition_group(
+                self._project_root, current, new_name.strip()
+            )
+        except (ValueError, OSError) as exc:
+            QMessageBox.warning(self, "Rename Condition Group", str(exc))
+            return
+        self._set_last_import_breed(current)
+        self._refresh_condition_group_combo(select=current)
+        self._refresh_sample_list()
+        self._refresh_analysis_if_visible()
+        self.update_tracking_result_panel()
+        self._status(f"Renamed Condition Group to: {renamed}")
+
+    def _on_delete_condition_group(self) -> None:
+        if self._project_root is None:
+            return
+        current = self._current_condition_group()
+        if not current:
+            QMessageBox.information(
+                self,
+                "Delete Condition Group",
+                "Create or select a Condition Group first.",
+            )
+            return
+        current_name = get_condition_group_name(self._project_root, current)
+        reply = QMessageBox.question(
+            self,
+            "Delete Condition Group",
+            f"Delete empty Condition Group '{current_name}'?\n\n"
+            "This cannot be undone. Samples or Data in the group block deletion.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            delete_empty_condition_group(self._project_root, current)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Delete Condition Group", str(exc))
+            return
+        self._refresh_condition_group_combo()
+        self._refresh_sample_list()
+        self._refresh_analysis_if_visible()
+        self._status(f"Deleted Condition Group: {current_name}")
 
     def _on_filter_group_changed(self) -> None:
-        self._set_last_import_breed(self.combo_filter_group.currentText())
+        group = self._current_condition_group()
+        if group:
+            self._set_last_import_breed(group)
         self._metric_analysis_view_active = False
         self._set_active_sample(None)
         self.reset_preview_state(
@@ -3580,8 +3759,14 @@ class MainWindow(QMainWindow):
         group: str | None = None,
         batch_name: str | None = None,
     ) -> None:
-        if group and group in GROUPS:
-            self.combo_filter_group.setCurrentText(group)
+        if group and condition_group_exists(self._project_root, group):
+            self.combo_filter_group.blockSignals(True)
+            idx = self.combo_filter_group.findData(group)
+            if idx < 0:
+                idx = self.combo_filter_group.findText(group)
+            if idx >= 0:
+                self.combo_filter_group.setCurrentIndex(idx)
+            self.combo_filter_group.blockSignals(False)
             self._set_last_import_breed(group)
         self._refresh_sample_list()
         if group and batch_name:
@@ -3602,13 +3787,9 @@ class MainWindow(QMainWindow):
             break
 
     def _ensure_filter_group_valid(self) -> str:
-        """Keep a valid condition group selected; fall back to the first."""
-        if self.combo_filter_group.currentText() in GROUPS:
-            return self.combo_filter_group.currentText()
-        self.combo_filter_group.blockSignals(True)
-        self.combo_filter_group.setCurrentIndex(0)
-        self.combo_filter_group.blockSignals(False)
-        return self.combo_filter_group.currentText()
+        """Return the selected Condition Group name, or empty when none exist."""
+        group = self._current_condition_group()
+        return group or ""
 
     def _selected_batch_record(self) -> dict[str, str] | None:
         if self._project_root is None:
@@ -3620,13 +3801,18 @@ class MainWindow(QMainWindow):
         return get_batch_by_name(self._project_root, group, name)
 
     @staticmethod
-    def _batch_list_header_text(group: str, batch: dict[str, Any]) -> str:
+    def _batch_list_header_text(
+        root: Path | None, group_id: str, batch: dict[str, Any]
+    ) -> str:
         num = int(batch.get("batch_number", 1) or 1)
         name = str(batch.get("batch_name", "")).strip()
         sample_label = display_sample_label(num, name)
+        group_label = (
+            get_condition_group_name(root, group_id) if root is not None else group_id
+        )
         if sanitize_batch_name(name) == sanitize_batch_name(display_batch_name(num)):
-            return f"──── {group} / {sample_label} ────"
-        return f"──── {group} / {sample_label}: {name} ────"
+            return f"──── {group_label} / {sample_label} ────"
+        return f"──── {group_label} / {sample_label}: {name} ────"
 
     def _context_batch_name(self, group: str | None = None) -> str | None:
         """Sample name for menu actions: current data file's sample, or ask if ambiguous."""
@@ -3642,7 +3828,7 @@ class MainWindow(QMainWindow):
             return None
         if len(batches) == 1:
             return str(batches[0]["batch_name"])
-        labels = [self._batch_list_header_text(group, b) for b in batches]
+        labels = [self._batch_list_header_text(self._project_root, group, b) for b in batches]
         names = [str(b["batch_name"]) for b in batches]
         picked, ok = QInputDialog.getItem(
             self,
@@ -3664,7 +3850,7 @@ class MainWindow(QMainWindow):
                 self, "Rename Sample", "No samples exist for this condition group."
             )
             return None
-        labels = [self._batch_list_header_text(group, b) for b in batches]
+        labels = [self._batch_list_header_text(self._project_root, group, b) for b in batches]
         names = [str(b["batch_name"]) for b in batches]
         picked, ok = QInputDialog.getItem(
             self,
@@ -3686,44 +3872,69 @@ class MainWindow(QMainWindow):
                 "Open or create a workspace first.",
             )
             return
-        breed = group or self.combo_filter_group.currentText()
-        path_str, _ = QFileDialog.getOpenFileName(
+        breed = group or self._current_condition_group()
+        if not breed:
+            QMessageBox.information(
+                self,
+                "Add Sample",
+                "Create a Condition Group before adding Samples.",
+            )
+            return
+        path_strs, _ = QFileDialog.getOpenFileNames(
             self,
             "Add Sample",
             str(self._default_import_dir()),
             DATA_IMPORT_FILTER,
         )
-        if not path_str:
+        if not path_strs:
             return
-        source = Path(path_str)
-        self._last_import_dir = source.parent
+        sources = [Path(p) for p in path_strs]
+        self._last_import_dir = sources[0].parent
         breadcrumb(
-            "gui.add_sample: selected", path=str(source), suffix=source.suffix.lower()
+            "gui.add_sample: selected",
+            count=len(sources),
+            first=str(sources[0]),
         )
-        try:
-            batch, _row = create_sample_from_data(self._project_root, breed, source)
-        except ValueError as exc:
-            breadcrumb("gui.add_sample: ValueError", error=str(exc))
-            QMessageBox.warning(self, "Add Sample", str(exc))
+        results = create_samples_from_data_files(self._project_root, breed, sources)
+        successes = [r for r in results if r.succeeded]
+        failures = [r for r in results if r.error]
+        if not successes:
+            summary = format_sample_import_summary(results, total_selected=len(sources))
+            breadcrumb("gui.add_sample: all failed", count=len(failures))
+            QMessageBox.warning(self, "Add Sample", summary)
             return
-        except (MediaLoadError, OSError) as exc:
-            breadcrumb("gui.add_sample: import error", error=str(exc))
-            QMessageBox.warning(self, "Add Sample", f"Import failed: {exc}")
-            return
-        breadcrumb("gui.add_sample: create returned, refreshing UI")
+        breadcrumb(
+            "gui.add_sample: create returned, refreshing UI",
+            succeeded=len(successes),
+            failed=len(failures),
+        )
+        first = successes[0]
+        batch = first.batch
+        assert batch is not None
         self._set_last_import_breed(breed)
-        if self.combo_filter_group.currentText() != breed:
-            self.combo_filter_group.setCurrentText(breed)
+        if self._current_condition_group() != breed:
+            self._refresh_condition_group_combo(select=breed)
         if self._preview_mode == "cropped_tracking":
             self.reset_preview_state(clear_image=True)
         self._after_import_refresh(group=breed, batch_name=str(batch["batch_name"]))
         self._auto_suggest_roi_for_new_sample(str(batch.get("sample_id", "")))
         self._refresh_analysis_if_visible()
-        label = display_sample_label(
-            int(batch.get("batch_number", 1) or 1),
-            str(batch.get("batch_name", "")),
-        )
-        self._status(f"Added {label} from {source.name}")
+        if failures:
+            summary = format_sample_import_summary(results, total_selected=len(sources))
+            QMessageBox.warning(self, "Add Sample", summary)
+        if len(sources) == 1:
+            label = display_sample_label(
+                int(batch.get("batch_number", 1) or 1),
+                str(batch.get("batch_name", "")),
+            )
+            self._status(f"Added {label} from {sources[0].name}")
+        elif failures:
+            self._status(
+                f"Added {len(successes)} of {len(sources)} samples "
+                f"(see import summary for failures)"
+            )
+        else:
+            self._status(f"Added {len(successes)} samples from {len(sources)} files")
 
     def _auto_suggest_roi_for_new_sample(self, sample_id: str) -> None:
         """Persist an auto-suggested ROI for a freshly added Sample.
@@ -3811,7 +4022,7 @@ class MainWindow(QMainWindow):
             self._load_project(Path(folder), "Project loaded")
 
     def _add_sample_list_header(self, group: str, batch: dict[str, Any]) -> None:
-        text = self._batch_list_header_text(group, batch)
+        text = self._batch_list_header_text(self._project_root, group, batch)
         item = QListWidgetItem(text)
         item.setFlags(Qt.ItemFlag.NoItemFlags)
         item.setForeground(QBrush(QColor("#888888")))
@@ -3849,9 +4060,14 @@ class MainWindow(QMainWindow):
 
     def _add_sample_list_row(self, row: pd.Series) -> None:
         status = str(row["processing_status"])
-        export_name = str(
-            row.get("final_export_name") or row.get("auto_export_name") or ""
-        ).strip()
+        row_dict = row.to_dict()
+        export_name = (
+            display_export_name_for_row(self._project_root, row_dict)
+            if self._project_root is not None
+            else str(
+                row.get("final_export_name") or row.get("auto_export_name") or ""
+            ).strip()
+        )
         if not export_name:
             export_name = str(row["sample_id"])
         original = str(row.get("original_filename", ""))
@@ -3881,7 +4097,15 @@ class MainWindow(QMainWindow):
             return
 
         group = self._ensure_filter_group_valid()
-        group_df = df[df["group"] == group]
+        if not group:
+            self._add_sample_list_message(
+                "Create a Condition Group before adding Samples. Use New Group above."
+            )
+            self._set_active_sample(None)
+            self._clear_preview_pane()
+            return
+
+        group_df = df[df["condition_group_id"].astype(str) == group] if "condition_group_id" in df.columns else df[df["group"].astype(str) == group]
 
         sync_registry_from_samples(self._project_root)
         batches = list_batches(self._project_root, group)
@@ -4030,12 +4254,13 @@ class MainWindow(QMainWindow):
 
         self._set_active_sample(data)
         group = str(data.get("group", ""))
-        if group and group in GROUPS and self.combo_filter_group.currentText() != group:
-            self.combo_filter_group.blockSignals(True)
-            idx = self.combo_filter_group.findText(group)
-            if idx >= 0:
-                self.combo_filter_group.setCurrentIndex(idx)
-            self.combo_filter_group.blockSignals(False)
+        if (
+            group
+            and self._project_root is not None
+            and condition_group_exists(self._project_root, group)
+            and self._current_condition_group() != group
+        ):
+            self._refresh_condition_group_combo(select=group)
         if data.get("processing_status") == "missing_file":
             return
 
@@ -4136,12 +4361,16 @@ class MainWindow(QMainWindow):
         self.lbl_selected_file.setText(
             f"{sid}\n{self._current_sample['original_filename']}"
         )
-        auto_name = str(self._current_sample.get("auto_export_name", ""))
-        final_name = str(self._current_sample.get("final_export_name", ""))
-        custom = str(self._current_sample.get("custom_export_name", ""))
+        auto_name = (
+            display_export_name_for_row(self._project_root, self._current_sample)
+            if self._project_root is not None
+            else str(self._current_sample.get("auto_export_name", ""))
+        )
+        custom = str(self._current_sample.get("custom_export_name", "")).strip()
+        final_name = custom or auto_name
         self.lbl_auto_export_name.setText(f"Auto name: {auto_name or '—'}")
         self.edit_export_name.blockSignals(True)
-        self.edit_export_name.setText(custom or final_name or auto_name)
+        self.edit_export_name.setText(final_name)
         self.edit_export_name.blockSignals(False)
 
     def _load_sample_data_context(self, *, render_full_preview: bool = True) -> bool:
@@ -4414,14 +4643,16 @@ class MainWindow(QMainWindow):
                 lambda g=group, b=batch_name: self._ctx_replace_sample_data(g, b),
             )
         else:
-            breed = self._ensure_filter_group_valid()
+            breed = self._current_condition_group()
             add_action = menu.addAction(
                 "Add Sample",
                 lambda: self._on_add_sample(breed),
             )
-            if breed not in GROUPS:
+            if not breed:
                 add_action.setEnabled(False)
-                menu.addAction("Please select a condition group first.").setEnabled(False)
+                menu.addAction(
+                    "Create a Condition Group before adding Samples."
+                ).setEnabled(False)
 
         if not menu.isEmpty():
             menu.exec(self.list_samples.viewport().mapToGlobal(pos))

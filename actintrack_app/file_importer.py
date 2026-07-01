@@ -26,8 +26,12 @@ from actintrack_app.export_naming import (
 )
 from actintrack_app.metadata import load_samples_csv, save_samples_csv
 from actintrack_app.project_manager import get_processed_batch_dir
+from actintrack_app.condition_group_manager import (
+    data_id_prefix_for_condition_group,
+    get_condition_group_name,
+    sync_data_file_group_bridge,
+)
 from actintrack_app.utils import (
-    GROUP_PREFIX,
     METADATA_DIR,
     SAMPLES_CSV,
     STATUS_RAW_IMPORTED,
@@ -44,9 +48,9 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _next_sample_id(df: pd.DataFrame, group: str) -> str:
-    prefix = GROUP_PREFIX[group]
-    existing = df[df["group"] == group]["sample_id"].astype(str).tolist()
+def _next_sample_id(df: pd.DataFrame, group_id: str, root: Path) -> str:
+    prefix = data_id_prefix_for_condition_group(root, group_id)
+    existing = df[df["group"].astype(str) == group_id]["sample_id"].astype(str).tolist()
     numbers = []
     for sid in existing:
         if sid.startswith(f"{prefix}_"):
@@ -61,7 +65,8 @@ def _next_sample_id(df: pd.DataFrame, group: str) -> str:
 def _build_sample_record(
     *,
     sample_id: str,
-    group: str,
+    group_id: str,
+    group_display: str,
     batch: dict,
     src_path: Path,
     dest_path: Path,
@@ -72,32 +77,35 @@ def _build_sample_record(
     is_video = is_video_path(src_path)
     batch_number = int(batch["batch_number"])
     auto_name = auto_export_name_for_sample(
-        group=group,
+        group=group_display,
         batch_number=batch_number,
         is_video=is_video,
         frame_number=frame_number,
     )
-    return {
-        "sample_id": sample_id,
-        "group": group,
-        "batch_number": str(batch_number),
-        "batch_name": str(batch["batch_name"]),
-        "batch_id": str(batch["batch_id"]),
-        "original_filename": src_path.name,
-        "stored_path": relative_to_root(root, dest_path),
-        "file_type": file_type_label(src_path),
-        "is_video": "true" if is_video else "false",
-        "is_image_sequence": "false" if is_video else "true",
-        "frame_number": str(frame_number),
-        "auto_export_name": auto_name,
-        "custom_export_name": "",
-        "final_export_name": auto_name,
-        "import_date": _utc_now_iso(),
-        "processing_status": STATUS_RAW_IMPORTED,
-        "annotation_source": "",
-        "review_status": "pending",
-        "notes": str(notes),
-    }
+    return sync_data_file_group_bridge(
+        {
+            "sample_id": sample_id,
+            "batch_number": str(batch_number),
+            "batch_name": str(batch["batch_name"]),
+            "batch_id": str(batch["batch_id"]),
+            "original_filename": src_path.name,
+            "stored_path": relative_to_root(root, dest_path),
+            "file_type": file_type_label(src_path),
+            "is_video": "true" if is_video else "false",
+            "is_image_sequence": "false" if is_video else "true",
+            "frame_number": str(frame_number),
+            "auto_export_name": auto_name,
+            "custom_export_name": "",
+            "final_export_name": auto_name,
+            "import_date": _utc_now_iso(),
+            "processing_status": STATUS_RAW_IMPORTED,
+            "annotation_source": "",
+            "review_status": "pending",
+            "notes": str(notes),
+        },
+        group_id=group_id,
+        display_name=group_display,
+    )
 
 
 def export_name_exists_in_batch(
@@ -112,7 +120,7 @@ def export_name_exists_in_batch(
     df = load_samples_csv(root / METADATA_DIR / SAMPLES_CSV)
     safe = sanitize_batch_name(batch_name)
     sub = df[
-        (df["group"] == group)
+        (df["group"].astype(str) == group)
         & (df["batch_name"].astype(str).apply(sanitize_batch_name) == safe)
     ]
     for _, row in sub.iterrows():
@@ -141,14 +149,17 @@ def import_files(
     notes: str = "",
 ) -> list[dict]:
     """
-    Copy files into raw/<group>/<batch_name>/ and append rows to samples.csv.
+    Copy files into raw/<condition_group_id>/<batch_name>/ and append rows.
+    ``group_name`` is the stable ``condition_group_id``.
     """
     root = Path(root_dir).resolve()
+    group_id = str(group_name).strip()
+    group_display = get_condition_group_name(root, group_id)
     safe_batch = sanitize_batch_name(batch_name)
-    ensure_batch_dirs(root, group_name, safe_batch)
+    ensure_batch_dirs(root, group_id, safe_batch)
     from actintrack_app.project_manager import get_raw_batch_dir
 
-    raw_dir = get_raw_batch_dir(root, group_name, safe_batch)
+    raw_dir = get_raw_batch_dir(root, group_id, safe_batch)
 
     samples_path = root / METADATA_DIR / SAMPLES_CSV
     df = load_samples_csv(samples_path)
@@ -179,10 +190,10 @@ def import_files(
 
         is_video = is_video_path(src_path)
         frame_number = 0 if is_video else next_frame_number_in_batch(
-            root, group_name, safe_batch
+            root, group_id, safe_batch
         )
 
-        sample_id = _next_sample_id(df, group_name)
+        sample_id = _next_sample_id(df, group_id, root)
         dest_name = f"{sample_id}{src_path.suffix.lower()}"
         dest_path = raw_dir / dest_name
         breadcrumb("import_files: storing", src=str(src_path), dest=str(dest_path))
@@ -197,7 +208,8 @@ def import_files(
 
         record = _build_sample_record(
             sample_id=sample_id,
-            group=group_name,
+            group_id=group_id,
+            group_display=group_display,
             batch=batch,
             src_path=src_path,
             dest_path=dest_path,
@@ -220,7 +232,7 @@ def import_files(
         created.append(import_result)
         df = load_samples_csv(samples_path)
 
-    refresh_batch_stats(root, group_name, safe_batch)
+    refresh_batch_stats(root, group_id, safe_batch)
     return created
 
 

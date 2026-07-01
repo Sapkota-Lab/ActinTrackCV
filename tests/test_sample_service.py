@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +13,7 @@ import cv2
 import numpy as np
 
 from actintrack_app.batch_manager import create_batch, get_batch_by_name
+from actintrack_app.condition_group_manager import create_condition_group
 from actintrack_app.metadata import (
     get_sample_annotation,
     load_samples_csv,
@@ -22,14 +24,16 @@ from actintrack_app.sample_service import (
     batch_has_auto_generated_name,
     clear_sample_derived_state,
     create_sample_from_data,
+    create_samples_from_data_files,
     default_sample_name_from_path,
     delete_sample_and_artifacts,
+    format_sample_import_summary,
     get_primary_data_row,
     replace_sample_data,
     sample_has_derived_state,
     validate_av_mp4_data_file,
 )
-from actintrack_app.utils import DATA_FILES_CSV, GROUP_WT_218, METADATA_DIR, SAMPLE_REGISTRY_JSON
+from actintrack_app.utils import DATA_FILES_CSV, METADATA_DIR, SAMPLE_REGISTRY_JSON
 
 
 def _write_test_video(path: Path, frames: int = 3) -> None:
@@ -52,7 +56,8 @@ class SampleServiceTests(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
         create_project_structure(self.root)
-        self.breed = GROUP_WT_218
+        record = create_condition_group(self.root, "Test Group")
+        self.breed = record.id
         self.video_a = self.root / "source_a.mp4"
         self.video_b = self.root / "source_b.mp4"
         _write_test_video(self.video_a)
@@ -150,6 +155,73 @@ class SampleServiceTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 create_sample_from_data(self.root, self.breed, self.video_a)
         self.assertIsNone(get_batch_by_name(self.root, self.breed, "source_a"))
+
+    def test_create_samples_from_data_files_empty_list(self) -> None:
+        results = create_samples_from_data_files(self.root, self.breed, [])
+        self.assertEqual(results, [])
+        df = load_samples_csv(self.root / METADATA_DIR / DATA_FILES_CSV)
+        self.assertTrue(df.empty)
+
+    def test_create_samples_from_data_files_one_per_file(self) -> None:
+        results = create_samples_from_data_files(
+            self.root, self.breed, [self.video_a, self.video_b]
+        )
+        self.assertEqual(len(results), 2)
+        self.assertTrue(all(r.succeeded for r in results))
+        df = load_samples_csv(self.root / METADATA_DIR / DATA_FILES_CSV)
+        self.assertEqual(len(df), 2)
+        names = sorted(str(r.batch["batch_name"]) for r in results if r.batch)
+        self.assertEqual(names, ["source_a", "source_b"])
+
+    def test_create_samples_from_data_files_uses_condition_group_id(self) -> None:
+        results = create_samples_from_data_files(
+            self.root, self.breed, [self.video_a]
+        )
+        self.assertEqual(len(results), 1)
+        row = results[0].row
+        assert row is not None
+        self.assertEqual(str(row["group"]), self.breed)
+        self.assertEqual(str(row["condition_group_id"]), self.breed)
+
+    def test_create_samples_from_data_files_partial_failure(self) -> None:
+        bad = self.root / "notes.txt"
+        bad.write_text("x", encoding="utf-8")
+        results = create_samples_from_data_files(
+            self.root, self.breed, [self.video_a, bad, self.video_b]
+        )
+        self.assertEqual(len(results), 3)
+        self.assertTrue(results[0].succeeded)
+        self.assertFalse(results[1].succeeded)
+        self.assertTrue(results[2].succeeded)
+        df = load_samples_csv(self.root / METADATA_DIR / DATA_FILES_CSV)
+        self.assertEqual(len(df), 2)
+        summary = format_sample_import_summary(results, total_selected=3)
+        self.assertIn("Imported 2 of 3 files.", summary)
+        self.assertIn("notes.txt", summary)
+
+    def test_create_samples_from_data_files_duplicate_stems(self) -> None:
+        other_dir = self.root / "other"
+        other_dir.mkdir()
+        duplicate = other_dir / "source_a.mp4"
+        shutil.copy2(self.video_b, duplicate)
+        results = create_samples_from_data_files(
+            self.root, self.breed, [self.video_a, duplicate]
+        )
+        self.assertEqual(len(results), 2)
+        self.assertTrue(all(r.succeeded for r in results))
+        names = [str(r.batch["batch_name"]) for r in results if r.batch]
+        self.assertEqual(names[0], "source_a")
+        self.assertEqual(names[1], "source_a_2")
+
+    def test_single_file_import_via_coordinator(self) -> None:
+        results = create_samples_from_data_files(
+            self.root, self.breed, [self.video_a]
+        )
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0].succeeded)
+        batch, row = create_sample_from_data(self.root, self.breed, self.video_b)
+        self.assertEqual(batch["batch_name"], "source_b")
+        self.assertEqual(row["original_filename"], "source_b.mp4")
 
 
 if __name__ == "__main__":

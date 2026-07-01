@@ -139,9 +139,9 @@ def _migrate_workspace_schema_v1(root: Path) -> None:
 
         bid = str(row.get("batch_id", "")).strip()
         if not bid:
-            from actintrack_app.utils import GROUP_PREFIX
+            from actintrack_app.utils import data_id_prefix_for_group
 
-            prefix = GROUP_PREFIX.get(group, "B")
+            prefix = data_id_prefix_for_group(group)
             bid = f"{prefix}_B{batch_number:03d}"
             df.at[idx, "batch_id"] = bid
             changed = True
@@ -175,7 +175,7 @@ def migrate_samples_batch_columns(root: Path) -> None:
         register_batch_from_samples,
         sanitize_batch_name,
     )
-    from actintrack_app.utils import GROUP_PREFIX, RAW_DIR
+    from actintrack_app.utils import RAW_DIR, data_id_prefix_for_group
 
     root = Path(root).resolve()
     samples_path = root / METADATA_DIR / SAMPLES_CSV
@@ -194,7 +194,7 @@ def migrate_samples_batch_columns(root: Path) -> None:
 
         changed = True
         safe_legacy = sanitize_batch_name(LEGACY_BATCH_NAME)
-        prefix = GROUP_PREFIX.get(group, "B")
+        prefix = data_id_prefix_for_group(group)
         bid = batch_id or f"{prefix}_B000"
         if not batch_id:
             register_batch_from_samples(root, group, safe_legacy, bid)

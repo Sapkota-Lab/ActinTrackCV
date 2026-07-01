@@ -127,7 +127,7 @@ The Shiny app discovers source videos, supports interactive ROI selection, runs 
 
 | Term | Meaning |
 |------|---------|
-| **Condition Group** | Researcher-defined experimental grouping — a genotype/breed, chemical treatment, control, mutant, environmental condition, or other experimental setup (e.g. `1_WT_218`, `2_WT_550`, `3_Mutant_515`, `4_Mutant_175`) |
+| **Condition Group** | Researcher-defined experimental grouping — a genotype, chemical treatment, control, mutant, environmental condition, or other setup you name when creating the workspace (e.g. `Control`, `LatB Treatment`, `Mutant + Chemical`) |
 | **Sample** | One imported AVI/MP4 **Data** file plus derived project state (orientation, ROI, metrics, analysis, notes) |
 | **Data** | User-facing term for an AVI/MP4 time-lapse file |
 | **ROI** | Rectangular region of interest around the usable actin-rich area; **autosaves** as you work (no Save ROI button) |
@@ -138,12 +138,13 @@ The Shiny app discovers source videos, supports interactive ROI selection, runs 
 ## Workflow
 
 1. **Open or create a workspace** — **File → New Workspace…** or **File → Open Workspace…**
-2. **Add Sample** — **Sample → Add Sample…** (or right-click a Condition Group/Sample row) and select an AVI/MP4 file
-3. **Select Data** — choose a Sample in the left panel to load its Data
-4. **Orient and ROI** — rotate/flip the frame as needed, then draw a rectangle around the actin-rich region. The ROI **autosaves**; there is no Save ROI button and no Approve/Reject ROI workflow.
-5. **Metric Analysis View** — open from the preview toolbar to enter cropped ROI playback and metric review. Playback loops continuously; use the frame slider to scrub manually. Playback speeds: **0.25×, 0.5×, 1×, 1.5×, 2×**. You can switch Samples while staying in Metric Analysis View.
-6. **Metrics** — Template Tracking and Optical Flow Motion Index calculations are scheduled automatically after ROI autosave or settings changes (2.5 s debounce). Both run on **cropped ROI frames** using the current orientation and ROI.
-7. **Analysis** — **Analysis → View Analysis…** for read-only aggregation by Condition Group and Sample from saved per-Sample results (does not re-run metrics).
+2. **Create a Condition Group** — **Workspace → New Condition Group…** (or **New Group** in the left panel) and enter a custom name such as `Control` or `LatB Treatment`
+3. **Add Sample** — **Sample → Add Sample…** (or right-click the sample list) and select one or more AVI/MP4 files. Each file becomes one Sample in the selected Condition Group.
+4. **Select Data** — choose a Sample in the left panel to load its Data
+5. **Orient and ROI** — rotate/flip the frame as needed, then draw a rectangle around the actin-rich region. The ROI **autosaves**; there is no Save ROI button and no Approve/Reject ROI workflow.
+6. **Metric Analysis View** — open from the preview toolbar to enter cropped ROI playback and metric review. Playback loops continuously; use the frame slider to scrub manually. Playback speeds: **0.25×, 0.5×, 1×, 1.5×, 2×**. You can switch Samples while staying in Metric Analysis View.
+7. **Metrics** — Template Tracking and Optical Flow Motion Index calculations are scheduled automatically after ROI autosave or settings changes (2.5 s debounce). Both run on **cropped ROI frames** using the current orientation and ROI.
+8. **Analysis** — **Analysis → View Analysis…** for read-only aggregation by Condition Group and Sample from saved per-Sample results (does not re-run metrics).
 
 ### Metric Analysis View
 

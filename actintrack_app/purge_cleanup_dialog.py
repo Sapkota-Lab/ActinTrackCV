@@ -35,7 +35,7 @@ from actintrack_app.purge_manager import (
     purge_sample_annotations_only,
     purge_sample_completely,
 )
-from actintrack_app.utils import GROUPS
+from actintrack_app.condition_group_manager import list_condition_group_records
 
 if TYPE_CHECKING:
     from actintrack_app.gui import MainWindow
@@ -164,8 +164,19 @@ class PurgeCleanupDialog(QDialog):
         scope_box = QGroupBox("Scope")
         scope_layout = QFormLayout(scope_box)
         self.combo_group = QComboBox()
-        self.combo_group.addItems(list(GROUPS))
-        idx = self.combo_group.findText(default_group)
+        for record in list_condition_group_records(self._root):
+            self.combo_group.addItem(record.name, record.id)
+        if self.combo_group.count() == 0:
+            self.combo_group.addItem("(no condition groups)", "")
+        from actintrack_app.condition_group_manager import resolve_condition_group_id
+
+        idx = -1
+        if default_group:
+            gid = resolve_condition_group_id(self._root, default_group)
+            if gid:
+                idx = self.combo_group.findData(gid)
+            if idx < 0:
+                idx = self.combo_group.findText(default_group)
         if idx >= 0:
             self.combo_group.setCurrentIndex(idx)
         self.combo_batch = QComboBox()
@@ -237,7 +248,11 @@ class PurgeCleanupDialog(QDialog):
             self.edit_confirm.setEnabled(False)
 
     def _refresh_batch_combo(self) -> None:
-        group = self.combo_group.currentText()
+        group = self.combo_group.currentData() or ""
+        if group == "":
+            group = None
+        else:
+            group = str(group)
         batches = list_samples(self._root, group)
         self.combo_batch.clear()
         for batch in batches:
@@ -263,7 +278,11 @@ class PurgeCleanupDialog(QDialog):
             )
             return
 
-        group = self.combo_group.currentText()
+        group = self.combo_group.currentData() or ""
+        if group == "":
+            group = None
+        else:
+            group = str(group)
         batch_data = self.combo_batch.currentData()
         batch_name = (
             str(batch_data.get("batch_name", "")).strip()

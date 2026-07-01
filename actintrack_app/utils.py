@@ -14,6 +14,8 @@ GROUP_MUTANT_175 = "4_Mutant_175"
 GROUP_WT = GROUP_WT_550
 GROUP_MUTANT = GROUP_MUTANT_515
 
+# Legacy preset groups from the original lab dataset. Not used for new workspaces;
+# active Condition Groups are stored per workspace in condition_groups.json.
 GROUPS = (GROUP_WT_218, GROUP_WT_550, GROUP_MUTANT_515, GROUP_MUTANT_175)
 
 GROUP_PREFIX = {
@@ -22,6 +24,20 @@ GROUP_PREFIX = {
     GROUP_MUTANT_515: "MUT515",
     GROUP_MUTANT_175: "MUT175",
 }
+
+
+def data_id_prefix_for_group(group: str) -> str:
+    """Stable export/data_id prefix for a Condition Group (legacy or custom)."""
+    import hashlib
+    import re
+
+    known = GROUP_PREFIX.get(str(group).strip())
+    if known:
+        return known
+    alnum = re.sub(r"[^A-Za-z0-9]+", "", str(group).strip())
+    stem = alnum[:8] if alnum else "GRP"
+    tail = hashlib.sha1(str(group).strip().encode("utf-8")).hexdigest()[:4].upper()
+    return f"{stem}{tail}"[:16]
 
 # Supported input formats
 SUPPORTED_EXTENSIONS = {
@@ -52,6 +68,7 @@ PREVIEWS_DIR = "previews"
 SAMPLES_CSV = "samples.csv"
 DATA_FILES_CSV = "data_files.csv"
 SAMPLE_REGISTRY_JSON = "sample_registry.json"
+CONDITION_GROUPS_JSON = "condition_groups.json"
 WORKSPACE_JSON = "workspace.json"
 CROP_METADATA_JSON = "crop_metadata.json"
 
@@ -105,6 +122,7 @@ F_ACTIN_MOTION_INDEX_SUMMARY_CSV = "f_actin_motion_index_summary.csv"
 
 DATA_FILES_CSV_COLUMNS = [
     "data_id",
+    "condition_group_id",
     "breed",
     "sample_number",
     "sample_name",
@@ -128,6 +146,7 @@ DATA_FILES_CSV_COLUMNS = [
 # Legacy v1 columns (data_id exposed as sample_id; registry id as batch_id).
 SAMPLES_CSV_COLUMNS = [
     "sample_id",
+    "condition_group_id",
     "group",
     "batch_number",
     "batch_name",

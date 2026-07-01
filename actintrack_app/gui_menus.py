@@ -21,7 +21,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from actintrack_app.utils import GROUPS
+from actintrack_app.condition_group_manager import list_condition_group_records
 
 if TYPE_CHECKING:
     from actintrack_app.gui import MainWindow
@@ -37,8 +37,8 @@ class PurgeFilteredDialog(QDialog):
         form = QFormLayout()
         self.combo_group = QComboBox()
         self.combo_group.addItem("(any condition group)", "")
-        for g in GROUPS:
-            self.combo_group.addItem(g, g)
+        for record in list_condition_group_records(self._root):
+            self.combo_group.addItem(record.name, record.id)
         self.edit_batch = QLineEdit()
         self.edit_batch.setPlaceholderText("Sample name or number (optional)")
         self.combo_status = QComboBox()
@@ -213,6 +213,19 @@ def setup_application_menus(window: "MainWindow") -> None:
     )
     act_remove_missing.triggered.connect(window._on_remove_missing_samples)
     ws_menu.addAction(act_remove_missing)
+
+    ws_menu.addSeparator()
+    act_new_group = QAction("New &Condition Group…", window)
+    act_new_group.triggered.connect(window._on_create_condition_group)
+    ws_menu.addAction(act_new_group)
+
+    act_rename_group = QAction("Rename Condition &Group…", window)
+    act_rename_group.triggered.connect(window._on_rename_condition_group)
+    ws_menu.addAction(act_rename_group)
+
+    act_delete_group = QAction("Delete Condition &Group…", window)
+    act_delete_group.triggered.connect(window._on_delete_condition_group)
+    ws_menu.addAction(act_delete_group)
 
     ws_menu.addSeparator()
     from actintrack_app.purge_cleanup_dialog import open_purge_cleanup_dialog

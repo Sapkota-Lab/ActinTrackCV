@@ -15,6 +15,7 @@ class DataFileRecord:
     sample_number: int
     sample_name: str
     sample_id: str  # registry sample stable ID (v1 batch_id)
+    condition_group_id: str = ""
     original_filename: str = ""
     stored_path: str = ""
     file_type: str = ""
@@ -33,6 +34,7 @@ class DataFileRecord:
     def to_v2_dict(self) -> dict[str, str]:
         return {
             "data_id": self.data_id,
+            "condition_group_id": self.condition_group_id,
             "breed": self.breed,
             "sample_number": str(self.sample_number),
             "sample_name": self.sample_name,
@@ -58,7 +60,8 @@ class DataFileRecord:
         d = self.to_v2_dict()
         return {
             "sample_id": d["data_id"],
-            "group": d["breed"],
+            "condition_group_id": d["condition_group_id"],
+            "group": d["condition_group_id"] or d["breed"],
             "batch_number": d["sample_number"],
             "batch_name": d["sample_name"],
             "batch_id": d["sample_id"],
@@ -89,6 +92,9 @@ class DataFileRecord:
         return cls(
             data_id=data_id,
             breed=str(row.get("breed") or row.get("group", "")),
+            condition_group_id=str(
+                row.get("condition_group_id") or row.get("group") or row.get("breed", "")
+            ),
             sample_number=int(str(row.get("sample_number") or row.get("batch_number", 1) or 1)),
             sample_name=str(row.get("sample_name") or row.get("batch_name", "")),
             sample_id=registry_id,
@@ -117,6 +123,7 @@ class SampleRegistryRecord:
     sample_number: int
     sample_name: str
     sample_id: str
+    condition_group_id: str = ""
     contains_video: bool = False
     video_file_count: int = 0
     image_file_count: int = 0
@@ -131,6 +138,7 @@ class SampleRegistryRecord:
     def to_v2_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
             "breed": self.breed,
+            "condition_group_id": self.condition_group_id,
             "sample_number": self.sample_number,
             "sample_name": self.sample_name,
             "sample_id": self.sample_id,
@@ -152,7 +160,8 @@ class SampleRegistryRecord:
     def to_v1_dict(self) -> dict[str, Any]:
         d = self.to_v2_dict()
         out: dict[str, Any] = {
-            "group": d["breed"],
+            "group": d.get("condition_group_id") or d["breed"],
+            "condition_group_id": d.get("condition_group_id", ""),
             "batch_number": d["sample_number"],
             "batch_name": d["sample_name"],
             "batch_id": d["sample_id"],
@@ -175,6 +184,9 @@ class SampleRegistryRecord:
     def from_v1_dict(cls, entry: dict[str, Any], breed: str) -> SampleRegistryRecord:
         return cls(
             breed=str(entry.get("breed") or entry.get("group", breed)),
+            condition_group_id=str(
+                entry.get("condition_group_id") or entry.get("group") or breed
+            ),
             sample_number=int(entry.get("sample_number") or entry.get("batch_number", 1) or 1),
             sample_name=str(entry.get("sample_name") or entry.get("batch_name", "")),
             sample_id=str(entry.get("sample_id") or entry.get("batch_id", "")),
