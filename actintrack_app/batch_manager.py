@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from actintrack_app.utils import METADATA_DIR, PROCESSED_DIR, RAW_DIR, VIDEO_EXTENSIONS
+from actintrack_app.utils import METADATA_DIR, PROCESSED_DIR, RAW_DIR, VIDEO_EXTENSIONS, replace_project_relative_prefix
 
 
 BATCHES_JSON = "batches.json"
@@ -418,10 +418,11 @@ def rename_batch(
     )
     for idx in df.index[mask]:
         stored = str(df.at[idx, "stored_path"])
-        old_part = f"{RAW_DIR}/{group}/{old_safe}/"
-        new_part = f"{RAW_DIR}/{group}/{new_safe}/"
-        if old_part in stored:
-            df.at[idx, "stored_path"] = stored.replace(old_part, new_part, 1)
+        df.at[idx, "stored_path"] = replace_project_relative_prefix(
+            stored,
+            (RAW_DIR, group, old_safe),
+            (RAW_DIR, group, new_safe),
+        )
         df.at[idx, "batch_name"] = new_safe
     save_samples_csv(samples_path, df)
     found["batch_name"] = new_safe

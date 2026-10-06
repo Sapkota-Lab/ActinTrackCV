@@ -14,6 +14,7 @@ from actintrack_app.orientation_research import (
     angle_relative_to_nucleus_deg,
     axial_angle_error_deg,
     axial_circular_mean_deg,
+    normalize_hough_lines_p,
     run_orientation_method,
 )
 
@@ -176,6 +177,34 @@ class StructureTensorResearchTests(unittest.TestCase):
                 )
                 self.assertEqual(result.method, method)
                 self.assertGreaterEqual(result.runtime_ms, 0.0)
+
+
+class HoughLinesPShapeNormalizationTests(unittest.TestCase):
+    def test_nested_and_flat_shapes_are_equivalent(self) -> None:
+        nested = np.array([[[10, 20, 40, 50]], [[5, 6, 7, 18]]], dtype=np.int32)
+        flat = np.array([[10, 20, 40, 50], [5, 6, 7, 18]], dtype=np.int32)
+        out_nested = normalize_hough_lines_p(nested)
+        out_flat = normalize_hough_lines_p(flat)
+        self.assertEqual(out_nested.shape, (2, 4))
+        self.assertEqual(out_flat.shape, (2, 4))
+        np.testing.assert_allclose(out_nested, out_flat)
+
+    def test_none_and_empty_become_zero_rows(self) -> None:
+        empty = normalize_hough_lines_p(None)
+        self.assertEqual(empty.shape, (0, 4))
+        empty_nested = normalize_hough_lines_p(np.empty((0, 1, 4), dtype=np.int32))
+        self.assertEqual(empty_nested.shape, (0, 4))
+
+    def test_malformed_shapes_are_rejected(self) -> None:
+        for bad in (
+            np.array([[1.0, 2.0], [3.0, 4.0]]),
+            np.array([[[1, 2, 3]]]),
+            np.array([1, 2, 3, 4]),
+            np.zeros((2, 2, 4)),
+        ):
+            with self.subTest(shape=bad.shape):
+                with self.assertRaises(ValueError):
+                    normalize_hough_lines_p(bad)
 
 
 if __name__ == "__main__":

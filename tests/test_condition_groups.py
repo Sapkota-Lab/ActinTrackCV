@@ -34,7 +34,7 @@ from actintrack_app.project_manager import create_project_structure
 from actintrack_app.sample_service import create_sample_from_data
 from actintrack_app.sample_transfer import move_sample_to_condition_group
 from actintrack_app.schema_compat import load_sample_registry_as_v1, read_workspace_schema_version
-from actintrack_app.utils import CONDITION_GROUPS_JSON, METADATA_DIR, RAW_DIR, SCHEMA_V2
+from actintrack_app.utils import CONDITION_GROUPS_JSON, METADATA_DIR, RAW_DIR, SCHEMA_V2, project_relative_parts
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "v1_workspace"
 
@@ -127,7 +127,11 @@ class ConditionGroupManagerTests(unittest.TestCase):
             get_condition_group_name(self.root, record.id),
             "LatB Treatment",
         )
-        self.assertTrue(str(df.iloc[0]["stored_path"]).startswith(f"{RAW_DIR}/{record.id}/"))
+        parts = project_relative_parts(str(df.iloc[0]["stored_path"]))
+        self.assertGreaterEqual(len(parts), 3)
+        self.assertEqual(parts[0], RAW_DIR)
+        self.assertEqual(parts[1], record.id)
+        self.assertTrue((self.root.joinpath(*parts)).is_file())
 
     def test_delete_empty_group_by_id_succeeds(self) -> None:
         create_project_structure(self.root)

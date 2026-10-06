@@ -345,6 +345,30 @@ def skeleton_tangent_orientations(
     )
 
 
+def normalize_hough_lines_p(lines: np.ndarray | None) -> np.ndarray:
+    """Normalize ``cv2.HoughLinesP`` output to shape ``(N, 4)``.
+
+    OpenCV may return either ``(N, 1, 4)`` or ``(N, 4)`` where each row is
+    ``(x1, y1, x2, y2)``. Those layouts are semantically equivalent. Other
+    shapes are rejected rather than silently reinterpreted.
+    """
+    if lines is None:
+        return np.empty((0, 4), dtype=np.float64)
+    arr = np.asarray(lines)
+    if arr.size == 0:
+        return np.empty((0, 4), dtype=np.float64)
+    if arr.ndim == 3 and arr.shape[1] == 1 and arr.shape[2] == 4:
+        arr = arr[:, 0, :]
+    elif arr.ndim == 2 and arr.shape[1] == 4:
+        pass
+    else:
+        raise ValueError(
+            f"Unexpected HoughLinesP array shape {arr.shape}; "
+            "expected (N, 1, 4) or (N, 4)."
+        )
+    return np.asarray(arr, dtype=np.float64)
+
+
 def hough_line_orientations(
     frame: np.ndarray,
     *,
@@ -367,9 +391,10 @@ def hough_line_orientations(
         maxLineGap=settings.hough_max_line_gap_px,
     )
     estimates: list[OrientationEstimate] = []
-    if lines is not None:
+    normalized = normalize_hough_lines_p(lines)
+    if normalized.size:
         diagonal = float(np.hypot(*signal.shape))
-        for raw in lines[:, 0, :]:
+        for raw in normalized:
             x0, y0, x1, y1 = map(float, raw)
             x, y = (x0 + x1) / 2.0, (y0 + y1) / 2.0
             xi, yi = int(round(x)), int(round(y))

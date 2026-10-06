@@ -20,6 +20,7 @@ from actintrack_app.metadata import (
     get_sample_annotation,
     load_samples_csv,
     save_sample_crop_annotation,
+    save_samples_csv,
 )
 from actintrack_app.project_manager import create_project_structure, get_raw_batch_dir
 from actintrack_app.sample_service import create_sample_from_data
@@ -29,7 +30,23 @@ from actintrack_app.sample_transfer import (
     move_sample_to_condition_group,
 )
 from actintrack_app.schema_compat import load_sample_registry_as_v1
-from actintrack_app.utils import CROP_METADATA_JSON, METADATA_DIR, RAW_DIR, SAMPLES_CSV
+from actintrack_app.utils import CROP_METADATA_JSON, METADATA_DIR, RAW_DIR, SAMPLES_CSV, project_relative_parts
+
+
+def _assert_stored_under_group(
+    test_case: unittest.TestCase,
+    stored_path: object,
+    group_id: str,
+    *,
+    batch_name: str | None = None,
+) -> tuple[str, ...]:
+    parts = project_relative_parts(str(stored_path))
+    test_case.assertGreaterEqual(len(parts), 3, msg=f"stored_path={stored_path!r}")
+    test_case.assertEqual(parts[0], RAW_DIR)
+    test_case.assertEqual(parts[1], group_id)
+    if batch_name is not None:
+        test_case.assertEqual(parts[2], batch_name)
+    return parts
 
 
 def _write_test_video(path: Path, frames: int = 3) -> None:
@@ -82,17 +99,45 @@ class SampleTransferTests(unittest.TestCase):
         moved = df[df["sample_id"].astype(str) == sample_id].iloc[0]
         self.assertEqual(str(moved["group"]), self.group_b.id)
         self.assertEqual(str(moved["condition_group_id"]), self.group_b.id)
-        self.assertIn(f"{RAW_DIR}/{self.group_b.id}/", str(moved["stored_path"]))
+        parts = _assert_stored_under_group(
+            self, moved["stored_path"], self.group_b.id, batch_name=batch_name
+        )
+        self.assertNotEqual(parts[1], self.group_a.id)
         self.assertFalse(old_raw.exists())
         new_raw = get_raw_batch_dir(self.root, self.group_b.id, batch_name)
         self.assertTrue(new_raw.is_dir())
-        self.assertTrue((self.root / str(moved["stored_path"])).is_file())
+        self.assertTrue((self.root.joinpath(*parts)).is_file())
 
         registry = load_sample_registry_as_v1(self.root)
         self.assertIsNone(get_batch_by_name(self.root, self.group_a.id, batch_name))
         self.assertIsNotNone(get_batch_by_name(self.root, self.group_b.id, batch_name))
         self.assertEqual(list_batches(self.root, self.group_a.id), [])
 
+    def test_move_rewrites_legacy_native_separator_stored_path(self) -> None:
+        """Windows-native stored_path separators must still retarget on move."""
+        row = self._import_sample(self.group_a.id, "win_sep.mp4")
+        sample_id = str(row["sample_id"])
+        batch_name = str(row["batch_name"])
+        filename = Path(str(row["stored_path"])).name
+
+        samples_path = self.root / METADATA_DIR / SAMPLES_CSV
+        df = load_samples_csv(samples_path)
+        mask = df["sample_id"].astype(str) == sample_id
+        legacy = "\\".join([RAW_DIR, self.group_a.id, batch_name, filename])
+        df.loc[mask, "stored_path"] = legacy
+        save_samples_csv(self.root, df)
+
+        move_sample_to_condition_group(self.root, sample_id, self.group_b.id)
+
+        df = load_samples_csv(samples_path)
+        moved = df[df["sample_id"].astype(str) == sample_id].iloc[0]
+        parts = _assert_stored_under_group(
+            self, moved["stored_path"], self.group_b.id, batch_name=batch_name
+        )
+        self.assertEqual(parts[-1], filename)
+        self.assertNotIn("\\", str(moved["stored_path"]))
+        self.assertTrue((self.root.joinpath(*parts)).is_file())
+        self.assertEqual(str(moved["condition_group_id"]), self.group_b.id)
     def test_move_sample_persists_after_reload(self) -> None:
         row = self._import_sample(self.group_a.id, "persist.mp4")
         sample_id = str(row["sample_id"])
@@ -114,10 +159,14 @@ class SampleTransferTests(unittest.TestCase):
         self.assertEqual(str(moved["sample_id"]), sample_id)
         self.assertEqual(str(moved["group"]), self.group_b.id)
         self.assertEqual(str(moved["condition_group_id"]), self.group_b.id)
-        self.assertIn(f"{RAW_DIR}/{self.group_b.id}/", str(moved["stored_path"]))
+        parts = _assert_stored_under_group(
+            self, moved["stored_path"], self.group_b.id, batch_name=batch_name
+        )
+        self.assertNotEqual(parts[1], self.group_a.id)
         self.assertTrue(
             get_raw_batch_dir(self.root, self.group_b.id, batch_name).is_dir()
         )
+        self.assertTrue((self.root.joinpath(*parts)).is_file())
 
     def test_same_group_move_is_no_op(self) -> None:
         row = self._import_sample(self.group_a.id, "noop.mp4")
@@ -190,6 +239,39 @@ class ExplorerDragDropMetaTests(unittest.TestCase):
             )
         )
         self.assertFalse(is_valid_sample_drop_target_meta(None))
+
+
+class ProjectRelativePathHelperTests(unittest.TestCase):
+    def test_parts_accept_native_and_posix_separators(self) -> None:
+        from actintrack_app.utils import (
+            join_project_relative,
+            project_relative_parts,
+            replace_project_relative_prefix,
+        )
+
+        posix = "raw/cg_a/batch/file.mp4"
+        native = "raw\\cg_a\\batch\\file.mp4"
+        self.assertEqual(
+            project_relative_parts(posix),
+            ("raw", "cg_a", "batch", "file.mp4"),
+        )
+        self.assertEqual(project_relative_parts(native), project_relative_parts(posix))
+        rewritten = replace_project_relative_prefix(
+            native,
+            ("raw", "cg_a", "batch"),
+            ("raw", "cg_b", "batch"),
+        )
+        self.assertEqual(rewritten, "raw/cg_b/batch/file.mp4")
+        self.assertEqual(
+            join_project_relative("raw", "cg_b", "batch", "file.mp4"),
+            rewritten,
+        )
+        self.assertEqual(
+            replace_project_relative_prefix(
+                posix, ("raw", "cg_other"), ("raw", "cg_b")
+            ),
+            posix,
+        )
 
 
 if __name__ == "__main__":

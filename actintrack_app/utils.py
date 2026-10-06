@@ -207,7 +207,51 @@ def file_type_label(path: Path) -> str:
 
 
 def relative_to_root(root: Path, path: Path) -> str:
+    """Return a project-relative path using portable POSIX separators.
+
+    Metadata rewrites and cross-OS project moves assume ``/`` separators.
+    Persist POSIX form regardless of the host OS.
+    """
     try:
-        return str(path.relative_to(root.resolve()))
+        return path.relative_to(root.resolve()).as_posix()
     except ValueError:
-        return str(path)
+        return Path(path).as_posix()
+
+
+def project_relative_parts(stored_path: str) -> tuple[str, ...]:
+    """Split a project-relative stored path into components (OS-agnostic)."""
+    normalized = str(stored_path).replace("\\", "/").strip("/")
+    if not normalized:
+        return ()
+    return tuple(part for part in normalized.split("/") if part and part != ".")
+
+
+def join_project_relative(*parts: str) -> str:
+    """Join project-relative path components with portable POSIX separators."""
+    cleaned: list[str] = []
+    for part in parts:
+        for piece in str(part).replace("\\", "/").split("/"):
+            if piece and piece != ".":
+                cleaned.append(piece)
+    return "/".join(cleaned)
+
+
+def replace_project_relative_prefix(
+    stored_path: str,
+    old_prefix: tuple[str, ...] | list[str],
+    new_prefix: tuple[str, ...] | list[str],
+) -> str:
+    """Replace a leading project-relative prefix; return portable POSIX form.
+
+    Accepts stored paths that used either ``/`` or ``\\`` separators. When the
+    leading components do not match ``old_prefix``, returns ``stored_path``
+    unchanged.
+    """
+    old = tuple(str(p) for p in old_prefix)
+    new = tuple(str(p) for p in new_prefix)
+    if not old:
+        raise ValueError("old_prefix must be non-empty.")
+    parts = project_relative_parts(stored_path)
+    if len(parts) < len(old) or parts[: len(old)] != old:
+        return str(stored_path)
+    return join_project_relative(*(new + parts[len(old) :]))

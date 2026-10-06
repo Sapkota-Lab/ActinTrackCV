@@ -24,7 +24,13 @@ from actintrack_app.condition_group_manager import (
 from actintrack_app.metadata import load_samples_csv, save_samples_csv
 from actintrack_app.project_manager import get_processed_batch_dir, get_raw_batch_dir
 from actintrack_app.purge_manager import collect_processed_artifacts_for_sample
-from actintrack_app.utils import METADATA_DIR, PREVIEWS_DIR, RAW_DIR, SAMPLES_CSV
+from actintrack_app.utils import (
+    METADATA_DIR,
+    PREVIEWS_DIR,
+    RAW_DIR,
+    SAMPLES_CSV,
+    replace_project_relative_prefix,
+)
 
 
 class SampleMoveError(ValueError):
@@ -221,21 +227,21 @@ def move_sample_to_condition_group(
         if not mask.any():
             raise SampleMoveError(f"No metadata rows found for Sample “{safe_batch}”.")
 
-        old_raw_part = f"{RAW_DIR}/{source_gid}/{safe_batch}/"
-        new_raw_part = f"{RAW_DIR}/{target_gid}/{safe_batch}/"
-
         for idx in df.index[mask]:
             row_dict = {str(k): str(v) for k, v in df.loc[idx].to_dict().items()}
             stored = str(df.at[idx, "stored_path"])
-            if old_raw_part in stored:
-                stored = stored.replace(old_raw_part, new_raw_part, 1)
-            elif stored.startswith(f"{RAW_DIR}/{source_gid}/"):
-                stored = stored.replace(
-                    f"{RAW_DIR}/{source_gid}/",
-                    f"{RAW_DIR}/{target_gid}/",
-                    1,
+            rewritten = replace_project_relative_prefix(
+                stored,
+                (RAW_DIR, source_gid, safe_batch),
+                (RAW_DIR, target_gid, safe_batch),
+            )
+            if rewritten == stored:
+                rewritten = replace_project_relative_prefix(
+                    stored,
+                    (RAW_DIR, source_gid),
+                    (RAW_DIR, target_gid),
                 )
-            row_dict["stored_path"] = stored
+            row_dict["stored_path"] = rewritten
             row_dict["batch_number"] = str(target_batch_number)
             row_dict["batch_id"] = _batch_id(target_gid, target_batch_number)
             row_dict = sync_data_file_group_bridge(

@@ -178,7 +178,7 @@ def migrate_samples_batch_columns(root: Path) -> None:
         register_batch_from_samples,
         sanitize_batch_name,
     )
-    from actintrack_app.utils import RAW_DIR, data_id_prefix_for_group
+    from actintrack_app.utils import RAW_DIR, data_id_prefix_for_group, project_relative_parts
 
     root = Path(root).resolve()
     samples_path = root / METADATA_DIR / SAMPLES_CSV
@@ -202,7 +202,7 @@ def migrate_samples_batch_columns(root: Path) -> None:
         if not batch_id:
             register_batch_from_samples(root, group, safe_legacy, bid)
 
-        parts = Path(stored).parts
+        parts = project_relative_parts(stored)
         # raw/<group>/<file> -> move metadata to raw/<group>/Legacy_Batch/<file>
         if (
             len(parts) >= 3
@@ -212,8 +212,8 @@ def migrate_samples_batch_columns(root: Path) -> None:
         ):
             filename = parts[2]
             new_stored = f"{RAW_DIR}/{group}/{safe_legacy}/{filename}"
-            src = root / stored
-            dest = root / new_stored
+            src = resolve_sample_path(root, stored)
+            dest = resolve_sample_path(root, new_stored)
             if src.is_file() and not dest.exists():
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 try:
@@ -256,7 +256,12 @@ def save_samples_csv(path_or_root: Path, df: pd.DataFrame) -> None:
 
 
 def resolve_sample_path(root: Path, stored_path: str) -> Path:
-    return Path(root).resolve() / stored_path
+    from actintrack_app.utils import project_relative_parts
+
+    parts = project_relative_parts(stored_path)
+    if not parts:
+        return Path(root).resolve() / str(stored_path)
+    return Path(root).resolve().joinpath(*parts)
 
 
 def is_sample_file_present(root: Path, stored_path: str) -> bool:

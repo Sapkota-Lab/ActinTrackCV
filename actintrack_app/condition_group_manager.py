@@ -29,6 +29,7 @@ from actintrack_app.utils import (
     PROCESSED_DIR,
     RAW_DIR,
     SAMPLES_CSV,
+    replace_project_relative_prefix,
 )
 
 _INVALID_NAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -390,10 +391,13 @@ def _migrate_data_files_to_ids(
             if legacy == new_id:
                 continue
             for sub in (RAW_DIR, PROCESSED_DIR, PREVIEWS_DIR):
-                old_part = f"{sub}/{legacy}/"
-                new_part = f"{sub}/{new_id}/"
-                if old_part in stored:
-                    stored = stored.replace(old_part, new_part, 1)
+                rewritten = replace_project_relative_prefix(
+                    stored,
+                    (sub, legacy),
+                    (sub, new_id),
+                )
+                if rewritten != stored:
+                    stored = rewritten
                     changed = True
         if stored != str(df.at[idx, "stored_path"]):
             df.at[idx, "stored_path"] = stored
